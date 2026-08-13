@@ -19,20 +19,26 @@ import(ggplot2)
 import(ggtree)
 import(stringr)
 import(tidygraph)
-importFrom(ape,drop.tip)
-importFrom(ape,nj)
-importFrom(ape,root)
+importFrom(ape,
+  drop.tip,
+  nj,
+  root
+)
 importFrom(ggtreeExtra,geom_fruit)
 importFrom(glue,glue)
-importFrom(igraph,"E<-")
-importFrom(igraph,"V<-")
-importFrom(igraph,E)
-importFrom(igraph,V)
-importFrom(igraph,ecount)
-importFrom(igraph,vcount)
+importFrom(igraph,
+  "E<-",
+  "V<-",
+  E,
+  V,
+  ecount,
+  vcount
+)
 importFrom(parallelDist,parDist)
 importFrom(phangorn,upgma)
-importFrom(stats,na.omit)
-importFrom(stats,reorder)
-importFrom(stats,setNames)
+importFrom(stats,
+  na.omit,
+  reorder,
+  setNames
+)
 useDynLib(mitodrift)

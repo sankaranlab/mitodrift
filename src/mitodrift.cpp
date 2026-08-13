@@ -11,6 +11,8 @@
 #include <sstream>
 #include <numeric>
 #include <mutex>
+#include <memory>
+#include <random>
 #include <chrono>
 #include <cstdlib>
 
@@ -1336,4 +1338,198 @@ std::vector< std::vector<arma::Col<int>> > tree_mcmc_parallel_seeded(std::vector
     parallelFor(0, static_cast<std::size_t>(nchains), worker);
 
     return chain_results;
+}
+
+struct MC3ChainResult {
+    std::vector<arma::Col<int>> cold_trace;
+    std::vector<arma::Col<int>> final_states;
+    std::vector<int> swap_attempts;
+    std::vector<int> swap_accepts;
+};
+
+MC3ChainResult tree_mc3_cpp_cached_threadsafe(
+    const std::vector<arma::Col<int>>& start_edges,
+    const std::vector<std::vector<double>>& logP,
+    const std::vector<double>& logA,
+    int max_iter,
+    int seed,
+    const std::vector<double>& temperatures,
+    int swap_interval) {
+
+    const std::size_t ntemps = temperatures.size();
+    if (ntemps == 0 || start_edges.size() != ntemps) {
+        stop("start_edges and temperatures must have the same positive length");
+    }
+    if (max_iter < 0) stop("max_iter must be non-negative");
+    if (swap_interval < 1) stop("swap_interval must be positive");
+    if (std::abs(temperatures[0] - 1.0) > 1e-12) {
+        stop("The first MC3 temperature must be 1");
+    }
+    for (std::size_t t = 0; t < ntemps; ++t) {
+        if (!std::isfinite(temperatures[t]) || temperatures[t] < 1.0 ||
+            (t > 0 && temperatures[t] <= temperatures[t - 1])) {
+            stop("MC3 temperatures must be finite, start at 1, and strictly increase");
+        }
+    }
+
+    const int n = static_cast<int>(start_edges[0].n_elem / 4) - 1;
+    if (n < 1) stop("MC3 requires a tree with at least one internal edge");
+
+    std::vector<std::unique_ptr<NNICache>> caches;
+    caches.reserve(ntemps);
+    std::vector<double> loglik(ntemps);
+    for (std::size_t t = 0; t < ntemps; ++t) {
+        caches.emplace_back(new NNICache(start_edges[t], logP, logA, false));
+        loglik[t] = caches[t]->total_loglik();
+    }
+
+    MC3ChainResult result;
+    result.cold_trace.resize(static_cast<std::size_t>(max_iter) + 1);
+    result.cold_trace[0] = caches[0]->E + 1;
+    result.swap_attempts.assign(ntemps > 0 ? ntemps - 1 : 0, 0);
+    result.swap_accepts.assign(ntemps > 0 ? ntemps - 1 : 0, 0);
+
+    std::mt19937 gen;
+    if (seed == -1) {
+        std::random_device rd;
+        gen.seed(rd());
+    } else {
+        gen.seed(seed);
+    }
+    std::uniform_int_distribution<> edge_dist(1, n);
+    std::uniform_int_distribution<> move_dist(0, 1);
+    std::uniform_real_distribution<> uniform(0.0, 1.0);
+    std::uniform_int_distribution<> pair_dist(0, ntemps > 1 ? static_cast<int>(ntemps) - 2 : 0);
+
+    for (int iter = 0; iter < max_iter; ++iter) {
+        for (std::size_t t = 0; t < ntemps; ++t) {
+            const int edge_n = edge_dist(gen);
+            const int which = move_dist(gen);
+            const double new_ll = caches[t]->compute_new_loglik(edge_n, which, true);
+            double delta;
+            if (loglik[t] == -std::numeric_limits<double>::infinity()) {
+                delta = new_ll > -std::numeric_limits<double>::infinity()
+                    ? std::numeric_limits<double>::infinity() : 0.0;
+            } else {
+                delta = (new_ll - loglik[t]) / temperatures[t];
+            }
+            if (std::log(uniform(gen)) < delta) {
+                caches[t]->commit_staged_nni();
+                loglik[t] = new_ll;
+            } else {
+                caches[t]->discard_staged_nni();
+            }
+        }
+
+        if (ntemps > 1 && (iter + 1) % swap_interval == 0) {
+            const int pair = pair_dist(gen);
+            const int next = pair + 1;
+            const double beta_i = 1.0 / temperatures[static_cast<std::size_t>(pair)];
+            const double beta_j = 1.0 / temperatures[static_cast<std::size_t>(next)];
+            const double log_alpha = (beta_i - beta_j) *
+                (loglik[static_cast<std::size_t>(next)] - loglik[static_cast<std::size_t>(pair)]);
+            result.swap_attempts[static_cast<std::size_t>(pair)]++;
+            if (std::log(uniform(gen)) < log_alpha) {
+                std::swap(caches[static_cast<std::size_t>(pair)], caches[static_cast<std::size_t>(next)]);
+                std::swap(loglik[static_cast<std::size_t>(pair)], loglik[static_cast<std::size_t>(next)]);
+                result.swap_accepts[static_cast<std::size_t>(pair)]++;
+            }
+        }
+        result.cold_trace[static_cast<std::size_t>(iter) + 1] = caches[0]->E + 1;
+    }
+
+    result.final_states.resize(ntemps);
+    for (std::size_t t = 0; t < ntemps; ++t) {
+        result.final_states[t] = caches[t]->E + 1;
+    }
+    return result;
+}
+
+struct SeededMC3Worker : public Worker {
+    const std::vector<std::vector<arma::Col<int>>>& start_edges;
+    const std::vector<std::vector<double>>& logP;
+    const std::vector<double>& logA;
+    const std::vector<int>& max_iter_vec;
+    const std::vector<int>& seeds;
+    const std::vector<double>& temperatures;
+    int swap_interval;
+    std::vector<MC3ChainResult>& results;
+
+    SeededMC3Worker(
+        const std::vector<std::vector<arma::Col<int>>>& start_edges,
+        const std::vector<std::vector<double>>& logP,
+        const std::vector<double>& logA,
+        const std::vector<int>& max_iter_vec,
+        const std::vector<int>& seeds,
+        const std::vector<double>& temperatures,
+        int swap_interval,
+        std::vector<MC3ChainResult>& results)
+        : start_edges(start_edges), logP(logP), logA(logA), max_iter_vec(max_iter_vec),
+          seeds(seeds), temperatures(temperatures), swap_interval(swap_interval), results(results) {}
+
+    void operator()(std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i) {
+            results[i] = tree_mc3_cpp_cached_threadsafe(
+                start_edges[i], logP, logA, max_iter_vec[i], seeds[i], temperatures, swap_interval);
+        }
+    }
+};
+
+// [[Rcpp::export]]
+List tree_mc3_parallel_seeded(
+    std::vector<std::vector<arma::Col<int>>> start_edges,
+    const std::vector<std::vector<double>>& logP,
+    const std::vector<double>& logA,
+    const std::vector<int>& max_iter_vec,
+    const std::vector<int>& seeds,
+    const std::vector<double>& temperatures,
+    int swap_interval = 10) {
+
+    const std::size_t nchains = start_edges.size();
+    if (nchains == 0 || max_iter_vec.size() != nchains || seeds.size() != nchains) {
+        stop("start_edges, max_iter_vec, and seeds must have the same positive length");
+    }
+    if (temperatures.empty() || std::abs(temperatures[0] - 1.0) > 1e-12) {
+        stop("MC3 temperatures must start at 1");
+    }
+    if (swap_interval < 1) stop("swap_interval must be positive");
+    for (std::size_t t = 0; t < temperatures.size(); ++t) {
+        if (!std::isfinite(temperatures[t]) || temperatures[t] < 1.0 ||
+            (t > 0 && temperatures[t] <= temperatures[t - 1])) {
+            stop("MC3 temperatures must be finite, start at 1, and strictly increase");
+        }
+    }
+    for (std::size_t i = 0; i < nchains; ++i) {
+        if (max_iter_vec[i] < 0) stop("max_iter_vec values must be non-negative");
+        if (start_edges[i].size() != temperatures.size()) {
+            stop("Each MC3 ensemble must have one start state per temperature");
+        }
+        for (std::size_t t = 0; t < start_edges[i].size(); ++t) {
+            start_edges[i][t] = reorderRcpp(start_edges[i][t]);
+        }
+    }
+
+    std::vector<MC3ChainResult> results(nchains);
+    SeededMC3Worker worker(
+        start_edges, logP, logA, max_iter_vec, seeds, temperatures, swap_interval, results);
+    parallelFor(0, nchains, worker);
+
+    List traces(nchains);
+    List final_states(nchains);
+    IntegerMatrix attempts(nchains, temperatures.size() > 0 ? temperatures.size() - 1 : 0);
+    IntegerMatrix accepts(nchains, temperatures.size() > 0 ? temperatures.size() - 1 : 0);
+    for (std::size_t i = 0; i < nchains; ++i) {
+        traces[i] = wrap(results[i].cold_trace);
+        final_states[i] = wrap(results[i].final_states);
+        for (std::size_t p = 0; p < results[i].swap_attempts.size(); ++p) {
+            attempts(i, p) = results[i].swap_attempts[p];
+            accepts(i, p) = results[i].swap_accepts[p];
+        }
+    }
+    return List::create(
+        _["traces"] = traces,
+        _["final_states"] = final_states,
+        _["swap_attempts"] = attempts,
+        _["swap_accepts"] = accepts,
+        _["temperatures"] = temperatures);
 }

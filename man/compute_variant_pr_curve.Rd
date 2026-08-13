@@ -9,7 +9,7 @@ compute_variant_pr_curve(
   mut_dat,
   min_vaf = 0.01,
   min_cells = 2,
-  j_thres = 0.66,
+  j_thres = 0.5,
   n_points = 50,
   ncores = 1
 )

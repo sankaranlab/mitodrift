@@ -4,145 +4,141 @@
 \alias{MitoDrift}
 \title{MitoDrift R6 Class}
 \description{
-MitoDrift R6 Class
-
-MitoDrift R6 Class
-}
-\details{
 A class for mitochondrial drift analysis with tree-based inference
 }
 \section{Public fields}{
-\if{html}{\out{<div class="r6-fields">}}
-\describe{
-\item{\code{tree_init}}{Initial phylogenetic tree (ape::phylo)}
+  \if{html}{\out{<div class="r6-fields">}}
+  \describe{
+    \item{\code{tree_init}}{Initial phylogenetic tree (ape::phylo)}
 
-\item{\code{A}}{Transition matrix}
+    \item{\code{A}}{Transition matrix}
 
-\item{\code{leaf_likelihoods}}{List of leaf likelihoods}
+    \item{\code{leaf_likelihoods}}{List of leaf likelihoods}
 
-\item{\code{logA}}{Vector of log transition probabilities}
+    \item{\code{logA}}{Vector of log transition probabilities}
 
-\item{\code{logP}}{List of log probabilities}
+    \item{\code{logP}}{List of log probabilities}
 
-\item{\code{model_params}}{Named vector containing model parameters (eps, err, npop, ngen, k)}
+    \item{\code{model_params}}{Named vector containing model parameters (eps, err, npop, ngen, k)}
 
-\item{\code{amat}}{Alternative allele count matrix}
+    \item{\code{amat}}{Alternative allele count matrix}
 
-\item{\code{dmat}}{Total depth matrix}
+    \item{\code{dmat}}{Total depth matrix}
 
-\item{\code{vmat}}{VAF matrix}
+    \item{\code{vmat}}{VAF matrix}
 
-\item{\code{mcmc_trace}}{MCMC trace for parameter fitting}
+    \item{\code{mcmc_trace}}{MCMC trace for parameter fitting}
 
-\item{\code{tree_list}}{List of trees from optimization}
+    \item{\code{tree_list}}{List of trees from optimization}
 
-\item{\code{tree_ml}}{Maximum likelihood tree}
+    \item{\code{tree_ml}}{Maximum likelihood tree}
 
-\item{\code{tree_annot}}{Annotated tree with clade frequencies}
+    \item{\code{tree_annot}}{Annotated tree with clade frequencies}
 
-\item{\code{ml_trace_file}}{File path for ML trace}
+    \item{\code{ml_trace_file}}{File path for ML trace}
 
-\item{\code{mcmc_trace_file}}{File path for MCMC trace}
+    \item{\code{mcmc_trace_file}}{File path for MCMC trace}
 
-\item{\code{mcmc_diag_file}}{File path for MCMC diagnostics}
+    \item{\code{mcmc_diag_file}}{File path for MCMC diagnostics}
 
-\item{\code{param_trace_file}}{File path for parameter fitting trace}
-}
-\if{html}{\out{</div>}}
+    \item{\code{param_trace_file}}{File path for parameter fitting trace}
+  }
+  \if{html}{\out{</div>}}
 }
 \section{Methods}{
 \subsection{Public methods}{
-\itemize{
-\item \href{#method-MitoDrift-new}{\code{MitoDrift$new()}}
-\item \href{#method-MitoDrift-print}{\code{MitoDrift$print()}}
-\item \href{#method-MitoDrift-make_model}{\code{MitoDrift$make_model()}}
-\item \href{#method-MitoDrift-fit_params_em}{\code{MitoDrift$fit_params_em()}}
-\item \href{#method-MitoDrift-optimize_tree}{\code{MitoDrift$optimize_tree()}}
-\item \href{#method-MitoDrift-run_mcmc}{\code{MitoDrift$run_mcmc()}}
-\item \href{#method-MitoDrift-annotate_tree}{\code{MitoDrift$annotate_tree()}}
-\item \href{#method-MitoDrift-copy}{\code{MitoDrift$copy()}}
-\item \href{#method-MitoDrift-clone}{\code{MitoDrift$clone()}}
-}
+  \itemize{
+    \item \href{#method-MitoDrift-initialize}{\code{MitoDrift$new()}}
+    \item \href{#method-MitoDrift-print}{\code{MitoDrift$print()}}
+    \item \href{#method-MitoDrift-make_model}{\code{MitoDrift$make_model()}}
+    \item \href{#method-MitoDrift-fit_params_em}{\code{MitoDrift$fit_params_em()}}
+    \item \href{#method-MitoDrift-optimize_tree}{\code{MitoDrift$optimize_tree()}}
+    \item \href{#method-MitoDrift-run_mcmc}{\code{MitoDrift$run_mcmc()}}
+    \item \href{#method-MitoDrift-annotate_tree}{\code{MitoDrift$annotate_tree()}}
+    \item \href{#method-MitoDrift-copy}{\code{MitoDrift$copy()}}
+    \item \href{#method-MitoDrift-clone}{\code{MitoDrift$clone()}}
+  }
 }
 \if{html}{\out{<hr>}}
-\if{html}{\out{<a id="method-MitoDrift-new"></a>}}
-\if{latex}{\out{\hypertarget{method-MitoDrift-new}{}}}
-\subsection{Method \code{new()}}{
-Initialize MitoDrift object
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{MitoDrift$new(
+\if{html}{\out{<a id="method-MitoDrift-initialize"></a>}}
+\if{latex}{\out{\hypertarget{method-MitoDrift-initialize}{}}}
+\subsection{\code{MitoDrift$new()}}{
+  Initialize MitoDrift object
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{MitoDrift$new(
   mut_dat = NULL,
   amat = NULL,
   dmat = NULL,
   model_params = NULL,
   build_tree = TRUE,
   ncores = 1
-)}\if{html}{\out{</div>}}
+)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{mut_dat}}{Mutation data in long format (data.frame with columns: variant, cell, d, a)}
+      \item{\code{amat}}{Alternative allele count matrix (optional, if mut_dat not provided)}
+      \item{\code{dmat}}{Total depth matrix (optional, if mut_dat not provided)}
+      \item{\code{model_params}}{Model parameters (optional)}
+      \item{\code{build_tree}}{Whether to build an initial NJ tree (default: TRUE)}
+      \item{\code{ncores}}{Number of cores used when building the initial NJ tree (default: 1)}
+    }
+    \if{html}{\out{</div>}}
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{mut_dat}}{Mutation data in long format (data.frame with columns: variant, cell, d, a)}
-
-\item{\code{amat}}{Alternative allele count matrix (optional, if mut_dat not provided)}
-
-\item{\code{dmat}}{Total depth matrix (optional, if mut_dat not provided)}
-
-\item{\code{model_params}}{Model parameters (optional)}
-
-\item{\code{build_tree}}{Whether to build an initial NJ tree (default: TRUE)}
-
-\item{\code{ncores}}{Number of cores used when building the initial NJ tree (default: 1)}
-}
-\if{html}{\out{</div>}}
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-MitoDrift-print"></a>}}
 \if{latex}{\out{\hypertarget{method-MitoDrift-print}{}}}
-\subsection{Method \code{print()}}{
-Print object summary
+\subsection{\code{MitoDrift$print()}}{
+  Print object summary
 
 Prints a summary of the MitoDrift object including data dimensions,
 tree information, model parameters, and available components.
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{MitoDrift$print()}\if{html}{\out{</div>}}
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{MitoDrift$print()}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    None (prints to console)
+  }
 }
 
-\subsection{Returns}{
-None (prints to console)
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-MitoDrift-make_model"></a>}}
 \if{latex}{\out{\hypertarget{method-MitoDrift-make_model}{}}}
-\subsection{Method \code{make_model()}}{
-Make model components
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{MitoDrift$make_model(model_params = NULL, ncores = 1)}\if{html}{\out{</div>}}
+\subsection{\code{MitoDrift$make_model()}}{
+  Make model components
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{MitoDrift$make_model(model_params = NULL, ncores = 1)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{model_params}}{Model parameters (optional)}
+      \item{\code{ncores}}{Number of cores to use}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    None
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{model_params}}{Model parameters (optional)}
-
-\item{\code{ncores}}{Number of cores to use}
-}
-\if{html}{\out{</div>}}
-}
-\subsection{Returns}{
-None
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-MitoDrift-fit_params_em"></a>}}
 \if{latex}{\out{\hypertarget{method-MitoDrift-fit_params_em}{}}}
-\subsection{Method \code{fit_params_em()}}{
-Fit tree parameters using Expectation-Maximization (EM) algorithm
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{MitoDrift$fit_params_em(
+\subsection{\code{MitoDrift$fit_params_em()}}{
+  Fit tree parameters using Expectation-Maximization (EM) algorithm
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{MitoDrift$fit_params_em(
   tree_fit,
   initial_params = c(ngen = 100, log_eps = log(0.001), log_err = log(0.001)),
   lower_bounds = c(ngen = 1, log_eps = log(1e-12), log_err = log(1e-12)),
@@ -150,75 +146,68 @@ Fit tree parameters using Expectation-Maximization (EM) algorithm
   max_iter = 10,
   epsilon = 0.001,
   ncores = 1
-)}\if{html}{\out{</div>}}
+)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{tree_fit}}{Tree to fit parameters to}
+      \item{\code{initial_params}}{Initial parameter values (ngen, log_eps, log_err)}
+      \item{\code{lower_bounds}}{Lower bounds for parameters in transformed space}
+      \item{\code{upper_bounds}}{Upper bounds for parameters in transformed space}
+      \item{\code{max_iter}}{Maximum number of EM iterations (default: 10)}
+      \item{\code{epsilon}}{Convergence threshold (default: 1e-3)}
+      \item{\code{ncores}}{Number of cores to use (default: 3)}
+      \item{\code{trace}}{Whether to return trace of parameter values (default: TRUE)}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    Fitted parameters or list of parameters and trace
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{tree_fit}}{Tree to fit parameters to}
-
-\item{\code{initial_params}}{Initial parameter values (ngen, log_eps, log_err)}
-
-\item{\code{lower_bounds}}{Lower bounds for parameters in transformed space}
-
-\item{\code{upper_bounds}}{Upper bounds for parameters in transformed space}
-
-\item{\code{max_iter}}{Maximum number of EM iterations (default: 10)}
-
-\item{\code{epsilon}}{Convergence threshold (default: 1e-3)}
-
-\item{\code{ncores}}{Number of cores to use (default: 3)}
-
-\item{\code{trace}}{Whether to return trace of parameter values (default: TRUE)}
-}
-\if{html}{\out{</div>}}
-}
-\subsection{Returns}{
-Fitted parameters or list of parameters and trace
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-MitoDrift-optimize_tree"></a>}}
 \if{latex}{\out{\hypertarget{method-MitoDrift-optimize_tree}{}}}
-\subsection{Method \code{optimize_tree()}}{
-Optimize tree using C++ implementation
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{MitoDrift$optimize_tree(
+\subsection{\code{MitoDrift$optimize_tree()}}{
+  Optimize tree using C++ implementation
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{MitoDrift$optimize_tree(
   max_iter = 100,
   ncores = 1,
   outfile = NULL,
   resume = FALSE,
   trace_interval = 5
-)}\if{html}{\out{</div>}}
+)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{max_iter}}{Maximum number of iterations (default: 100)}
+      \item{\code{ncores}}{Number of cores to use (default: 1)}
+      \item{\code{outfile}}{Output file for saving results (optional)}
+      \item{\code{resume}}{Whether to resume from existing file (default: FALSE)}
+      \item{\code{trace_interval}}{Interval for saving trace (default: 5)}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    Optimization result object
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{max_iter}}{Maximum number of iterations (default: 100)}
-
-\item{\code{ncores}}{Number of cores to use (default: 1)}
-
-\item{\code{outfile}}{Output file for saving results (optional)}
-
-\item{\code{resume}}{Whether to resume from existing file (default: FALSE)}
-
-\item{\code{trace_interval}}{Interval for saving trace (default: 5)}
-}
-\if{html}{\out{</div>}}
-}
-\subsection{Returns}{
-Optimization result object
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-MitoDrift-run_mcmc"></a>}}
 \if{latex}{\out{\hypertarget{method-MitoDrift-run_mcmc}{}}}
-\subsection{Method \code{run_mcmc()}}{
-Run phylogenetic MCMC sampling
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{MitoDrift$run_mcmc(
+\subsection{\code{MitoDrift$run_mcmc()}}{
+  Run phylogenetic MCMC sampling
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{MitoDrift$run_mcmc(
   max_iter = 10000,
   conv_thres = NULL,
   nchains = 1000,
@@ -229,119 +218,117 @@ Run phylogenetic MCMC sampling
   resume = FALSE,
   diag = TRUE,
   use_nj = FALSE,
-  diagfile = NULL
-)}\if{html}{\out{</div>}}
+  diagfile = NULL,
+  mc3_temperatures = NULL,
+  mc3_swap_interval = 10L,
+  mc3_statefile = NULL
+)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{max_iter}}{Maximum number of MCMC iterations (default: 10000)}
+      \item{\code{conv_thres}}{Convergence threshold for ASDSF (default: NULL)}
+      \item{\code{nchains}}{Number of MCMC chains (default: 1000)}
+      \item{\code{ncores}}{Number of cores to use (default: 1)}
+      \item{\code{ncores_qs}}{Number of cores to use for QS operations (default: 1)}
+      \item{\code{batch_size}}{Batch size for MCMC (default: 1000)}
+      \item{\code{outfile}}{Output file for saving results (optional)}
+      \item{\code{resume}}{Whether to resume from existing file (default: FALSE)}
+      \item{\code{diag}}{Whether to compute ASDSF diagnostics (default: TRUE)}
+      \item{\code{use_nj}}{Whether to use NJ tree instead of ML tree as initial tree (default: FALSE)}
+      \item{\code{diagfile}}{File path for saving ASDSF diagnostics (RDS)}
+      \item{\code{mc3_temperatures}}{Optional temperature ladder starting at 1;
+enables Metropolis-coupled MCMC when supplied.}
+      \item{\code{mc3_swap_interval}}{Iterations between adjacent-temperature swaps.}
+      \item{\code{mc3_statefile}}{Optional heated-state checkpoint path.}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    MCMC result object
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{max_iter}}{Maximum number of MCMC iterations (default: 10000)}
-
-\item{\code{conv_thres}}{Convergence threshold for ASDSF (default: NULL)}
-
-\item{\code{nchains}}{Number of MCMC chains (default: 1000)}
-
-\item{\code{ncores}}{Number of cores to use (default: 1)}
-
-\item{\code{ncores_qs}}{Number of cores to use for QS operations (default: 1)}
-
-\item{\code{batch_size}}{Batch size for MCMC (default: 1000)}
-
-\item{\code{outfile}}{Output file for saving results (optional)}
-
-\item{\code{resume}}{Whether to resume from existing file (default: FALSE)}
-
-\item{\code{diag}}{Whether to compute ASDSF diagnostics (default: TRUE)}
-
-\item{\code{use_nj}}{Whether to use NJ tree instead of ML tree as initial tree (default: FALSE)}
-
-\item{\code{diagfile}}{File path for saving ASDSF diagnostics (RDS)}
-}
-\if{html}{\out{</div>}}
-}
-\subsection{Returns}{
-MCMC result object
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-MitoDrift-annotate_tree"></a>}}
 \if{latex}{\out{\hypertarget{method-MitoDrift-annotate_tree}{}}}
-\subsection{Method \code{annotate_tree()}}{
-Trim tree using MCMC results
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{MitoDrift$annotate_tree(
+\subsection{\code{MitoDrift$annotate_tree()}}{
+  Trim tree using MCMC results
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{MitoDrift$annotate_tree(
   burnin = 0,
   max_iter = 1e+08,
   use_nj = FALSE,
   ncores = 1,
   ncores_qs = 1,
   mcmc_trace_file = NULL
-)}\if{html}{\out{</div>}}
+)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{burnin}}{Number of burnin iterations (default: 0)}
+      \item{\code{max_iter}}{Maximum iteration to include (default: 1e8)}
+      \item{\code{use_nj}}{Whether to use NJ tree instead of ML tree (default: FALSE)}
+      \item{\code{ncores}}{Number of cores to use (default: 1)}
+      \item{\code{ncores_qs}}{Number of cores to use for QS operations (default: 1)}
+      \item{\code{mcmc_trace_file}}{MCMC result file (optional, uses stored file if NULL)}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    Annotate tree with clade frequencies
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{burnin}}{Number of burnin iterations (default: 0)}
-
-\item{\code{max_iter}}{Maximum iteration to include (default: 1e8)}
-
-\item{\code{use_nj}}{Whether to use NJ tree instead of ML tree (default: FALSE)}
-
-\item{\code{ncores}}{Number of cores to use (default: 1)}
-
-\item{\code{ncores_qs}}{Number of cores to use for QS operations (default: 1)}
-
-\item{\code{mcmc_trace_file}}{MCMC result file (optional, uses stored file if NULL)}
-}
-\if{html}{\out{</div>}}
-}
-\subsection{Returns}{
-Annotate tree with clade frequencies
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-MitoDrift-copy"></a>}}
 \if{latex}{\out{\hypertarget{method-MitoDrift-copy}{}}}
-\subsection{Method \code{copy()}}{
-Create a copy of a MitoDrift object with updated structure
+\subsection{\code{MitoDrift$copy()}}{
+  Create a copy of a MitoDrift object with updated structure
 
 This method creates a new MitoDrift instance with the same data but updated
 class structure. Useful for refreshing objects created with older versions
 of the code.
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{MitoDrift$copy(old_obj, rebuild_tree = FALSE)}\if{html}{\out{</div>}}
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{MitoDrift$copy(old_obj, rebuild_tree = FALSE)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{old_obj}}{The old MitoDrift object to copy from}
+      \item{\code{rebuild_tree}}{Whether to rebuild the initial tree from data (default: FALSE)}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    A new MitoDrift object with the same data
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{old_obj}}{The old MitoDrift object to copy from}
-
-\item{\code{rebuild_tree}}{Whether to rebuild the initial tree from data (default: FALSE)}
-}
-\if{html}{\out{</div>}}
-}
-\subsection{Returns}{
-A new MitoDrift object with the same data
-}
-}
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-MitoDrift-clone"></a>}}
 \if{latex}{\out{\hypertarget{method-MitoDrift-clone}{}}}
-\subsection{Method \code{clone()}}{
-The objects of this class are cloneable with this method.
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{MitoDrift$clone(deep = FALSE)}\if{html}{\out{</div>}}
+\subsection{\code{MitoDrift$clone()}}{
+  The objects of this class are cloneable with this method.
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{MitoDrift$clone(deep = FALSE)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{deep}}{Whether to make a deep clone.}
+    }
+    \if{html}{\out{</div>}}
+  }
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{deep}}{Whether to make a deep clone.}
-}
-\if{html}{\out{</div>}}
-}
-}
 }

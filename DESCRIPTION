@@ -4,6 +4,7 @@ Version: 1.1.0
 Authors@R: 
     person("Teng", "Gao", , "tgao@broadinstitute.org", role = c("aut", "cre"),
            comment = c(ORCID = "0000-0002-0196-689X"))
+Author: Teng Gao [aut, cre]
 Description: Reconstructing single-cell lineage history using mitochondrial mutation drift dynamics
 License: MIT + file LICENSE
 URL: https://sankaranlab.github.io/mitodrift/, https://github.com/sankaranlab/mitodrift

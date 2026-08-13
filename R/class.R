@@ -287,6 +287,10 @@ MitoDrift <- R6::R6Class("MitoDrift",
         #' @param batch_size Batch size for MCMC (default: 1000)
         #' @param diag Whether to compute ASDSF diagnostics (default: TRUE)
         #' @param diagfile File path for saving ASDSF diagnostics (RDS)
+        #' @param mc3_temperatures Optional temperature ladder starting at 1;
+        #'   enables Metropolis-coupled MCMC when supplied.
+        #' @param mc3_swap_interval Iterations between adjacent-temperature swaps.
+        #' @param mc3_statefile Optional heated-state checkpoint path.
         #' @return MCMC result object
         run_mcmc = function(
             max_iter = 10000,
@@ -299,7 +303,10 @@ MitoDrift <- R6::R6Class("MitoDrift",
             resume = FALSE,
             diag = TRUE,
             use_nj = FALSE,
-            diagfile = NULL
+            diagfile = NULL,
+            mc3_temperatures = NULL,
+            mc3_swap_interval = 10L,
+            mc3_statefile = NULL
         ) {
 
             if (!is.null(outfile)) {
@@ -344,7 +351,10 @@ MitoDrift <- R6::R6Class("MitoDrift",
                 resume = resume,
                 diag = diag,
                 batch_size = batch_size,
-                diagfile = diagfile
+                diagfile = diagfile,
+                mc3_temperatures = mc3_temperatures,
+                mc3_swap_interval = mc3_swap_interval,
+                mc3_statefile = mc3_statefile
             )
             
             message('Phylogenetic MCMC completed!')
@@ -442,4 +452,4 @@ MitoDrift <- R6::R6Class("MitoDrift",
     private = list(
         # Private methods can be added here if needed
     )
-) 
+)

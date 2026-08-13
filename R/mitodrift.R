@@ -512,11 +512,19 @@ safe_read_chain = function(path, ncores = 1) {
 #' @param conv_thres Numeric or `NULL`; if set, run until the ASDSF drops
 #'   below this threshold instead of using `max_iter`.
 #' @param resume Logical; if `TRUE`, resume from existing `outfile`.
+#' @param mc3_temperatures Optional numeric temperature ladder for
+#'   Metropolis-coupled MCMC. It must start at 1 and strictly increase. `NULL`
+#'   runs the original independent-chain sampler.
+#' @param mc3_swap_interval Positive integer; iterations between proposed
+#'   swaps of randomly selected adjacent temperatures.
+#' @param mc3_statefile Optional RDS checkpoint for heated-chain states and
+#'   swap statistics. Defaults to `paste0(outfile, ".mc3_state.rds")`.
 #' @return A list of edge-list chains (one list of edge matrices per chain).
 #' @keywords internal
 run_tree_mcmc_batch = function(
     phy_init, logP_list, logA_vec, outfile, diagfile = NULL, diag = TRUE, max_iter = 10000, nchains = 1, ncores = 1, ncores_qs = 1,
-    batch_size = 1000, conv_thres = NULL, resume = FALSE
+    batch_size = 1000, conv_thres = NULL, resume = FALSE,
+    mc3_temperatures = NULL, mc3_swap_interval = 10L, mc3_statefile = NULL
 ) {
 
     RhpcBLASctl::blas_set_num_threads(1)
@@ -526,7 +534,23 @@ run_tree_mcmc_batch = function(
     ncores_qs <- if (isTRUE(qs2:::check_TBB())) ncores_qs else 1L
     message('Using ', ncores_qs, ' cores for saving/writing MCMC trace')
 
-    if (!is.null(diagfile) && file.exists(diagfile)) {
+    use_mc3 <- !is.null(mc3_temperatures)
+    if (use_mc3) {
+        mc3_temperatures <- as.numeric(mc3_temperatures)
+        if (length(mc3_temperatures) < 2L || mc3_temperatures[[1]] != 1 ||
+            any(!is.finite(mc3_temperatures)) || any(diff(mc3_temperatures) <= 0)) {
+            stop('mc3_temperatures must contain at least two finite, strictly increasing values starting at 1')
+        }
+        mc3_swap_interval <- as.integer(mc3_swap_interval)
+        if (length(mc3_swap_interval) != 1L || is.na(mc3_swap_interval) || mc3_swap_interval < 1L) {
+            stop('mc3_swap_interval must be a positive integer')
+        }
+        if (is.null(mc3_statefile)) mc3_statefile <- paste0(outfile, '.mc3_state.rds')
+        message('MC3 enabled with temperatures: ', paste(mc3_temperatures, collapse = ', '),
+                '; adjacent swap interval: ', mc3_swap_interval)
+    }
+
+    if (resume && !is.null(diagfile) && file.exists(diagfile)) {
         diag_history = readRDS(diagfile)
     } else {
         diag_history = data.frame()
@@ -560,6 +584,33 @@ run_tree_mcmc_batch = function(
     }
     names(edge_list_all) = as.character(chains)
 
+    mc3_checkpoint <- NULL
+    if (use_mc3 && resume && file.exists(mc3_statefile)) {
+        mc3_checkpoint <- readRDS(mc3_statefile)
+        if (!identical(as.numeric(mc3_checkpoint$temperatures), mc3_temperatures) ||
+            !identical(as.integer(mc3_checkpoint$swap_interval), mc3_swap_interval)) {
+            stop('MC3 checkpoint temperature ladder or swap interval does not match the requested run')
+        }
+        checkpoint_iter <- if (is.null(mc3_checkpoint$completed_iters)) NA_integer_ else as.integer(mc3_checkpoint$completed_iters)
+        trace_iter <- length(edge_list_all[[1]]) - 1L
+        if (is.na(checkpoint_iter) || checkpoint_iter != trace_iter) {
+            stop('MC3 heated-state checkpoint is not synchronized with the cold-chain trace')
+        }
+    }
+    if (use_mc3 && is.null(mc3_checkpoint)) {
+        if (resume && any(lengths(edge_list_all) > 1L)) {
+            stop('Cannot resume MC3: heated-chain checkpoint is missing: ', mc3_statefile)
+        }
+        mc3_checkpoint <- list(
+            states = lapply(chains, function(i) rep(list(phy_init$edge), length(mc3_temperatures))),
+            temperatures = mc3_temperatures,
+            swap_interval = mc3_swap_interval,
+            swap_attempts = matrix(0L, nrow = nchains, ncol = length(mc3_temperatures) - 1L),
+            swap_accepts = matrix(0L, nrow = nchains, ncol = length(mc3_temperatures) - 1L),
+            completed_iters = 0L
+        )
+    }
+
     completed_iters = length(edge_list_all[[1]]) - 1L
 
     if (is.null(conv_thres)) {
@@ -573,7 +624,7 @@ run_tree_mcmc_batch = function(
         message('Running MCMC with ', length(chains), ' chains in up to ', total_batches, ' batches of ', batch_size)
     } else {
         if (nrow(diag_history) > 0) {
-            last_asdsf <- tail(diag_history$asdsf, 1)
+            last_asdsf <- utils::tail(diag_history$asdsf, 1)
             if (last_asdsf <= conv_thres) {
                 message('Convergence threshold (ASDSF) already reached (', signif(last_asdsf, 4), '). Nothing to run.')
                 return(edge_list_all)
@@ -611,15 +662,34 @@ run_tree_mcmc_batch = function(
         start_edges = lapply(edge_list_all, function(chain_list) {
             chain_list[[length(chain_list)]]
         })
-        seed_vec = as.integer(1000003L * (batch_idx - 1L) + chains)
+        seed_index <- if (use_mc3) completed_iters else batch_idx - 1L
+        seed_vec = as.integer((1000003 * seed_index + chains) %% .Machine$integer.max)
 
-        elist_active = tree_mcmc_parallel_seeded(
-            start_edges,
-            logP_list,
-            logA_vec,
-            iter_vec,
-            seed_vec
-        )
+        if (use_mc3) {
+            mc3_result <- tree_mc3_parallel_seeded(
+                mc3_checkpoint$states,
+                logP_list,
+                logA_vec,
+                iter_vec,
+                seed_vec,
+                mc3_temperatures,
+                mc3_swap_interval
+            )
+            elist_active <- mc3_result$traces
+            mc3_checkpoint$states <- lapply(mc3_result$final_states, function(ensemble) {
+                lapply(ensemble, function(edges) matrix(edges, ncol = 2))
+            })
+            mc3_checkpoint$swap_attempts <- mc3_checkpoint$swap_attempts + mc3_result$swap_attempts
+            mc3_checkpoint$swap_accepts <- mc3_checkpoint$swap_accepts + mc3_result$swap_accepts
+        } else {
+            elist_active = tree_mcmc_parallel_seeded(
+                start_edges,
+                logP_list,
+                logA_vec,
+                iter_vec,
+                seed_vec
+            )
+        }
 
         for (chain_id in seq_along(edge_list_all)) {
             elist = restore_elist(elist_active[[chain_id]])
@@ -630,6 +700,10 @@ run_tree_mcmc_batch = function(
         }
 
         qs2::qd_save(edge_list_all, outfile, nthreads = ncores_qs)
+        if (use_mc3) {
+            mc3_checkpoint$completed_iters <- length(edge_list_all[[1]]) - 1L
+            saveRDS(mc3_checkpoint, mc3_statefile)
+        }
 
         asdsf <- compute_target_tree_asdsf(
             phy_target = phy_init,
@@ -643,7 +717,10 @@ run_tree_mcmc_batch = function(
             diag_entry = data.frame(
                 batch = batch_idx,
                 completed_iters = length(edge_list_all[[1]]) - 1L,
-                asdsf = asdsf
+                asdsf = asdsf,
+                mc3_swap_acceptance = if (use_mc3) {
+                    sum(mc3_checkpoint$swap_accepts) / sum(mc3_checkpoint$swap_attempts)
+                } else NA_real_
             )
             diag_history = bind_rows(diag_history, diag_entry)
             saveRDS(diag_history, diagfile)

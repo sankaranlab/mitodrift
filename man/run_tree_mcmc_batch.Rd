@@ -17,7 +17,10 @@ run_tree_mcmc_batch(
   ncores_qs = 1,
   batch_size = 1000,
   conv_thres = NULL,
-  resume = FALSE
+  resume = FALSE,
+  mc3_temperatures = NULL,
+  mc3_swap_interval = 10L,
+  mc3_statefile = NULL
 )
 }
 \arguments{
@@ -51,6 +54,16 @@ diagnostics are always computed).}
 below this threshold instead of using \code{max_iter}.}
 
 \item{resume}{Logical; if \code{TRUE}, resume from existing \code{outfile}.}
+
+\item{mc3_temperatures}{Optional numeric temperature ladder for
+Metropolis-coupled MCMC. It must start at 1 and strictly increase. \code{NULL}
+runs the original independent-chain sampler.}
+
+\item{mc3_swap_interval}{Positive integer; iterations between proposed
+swaps of randomly selected adjacent temperatures.}
+
+\item{mc3_statefile}{Optional RDS checkpoint for heated-chain states and
+swap statistics. Defaults to \code{paste0(outfile, ".mc3_state.rds")}.}
 }
 \value{
 A list of edge-list chains (one list of edge matrices per chain).
