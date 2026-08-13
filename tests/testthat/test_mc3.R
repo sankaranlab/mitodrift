@@ -1,14 +1,3 @@
-make_mc3_test_model <- function() {
-    mut_dat <- utils::read.csv(system.file("extdata", "small_test_mut_dat.csv", package = "mitodrift"))
-    md <- MitoDrift$new(
-        mut_dat = mut_dat,
-        model_params = c(eps = 0.001, err = 0, npop = 600, ngen = 100, k = 20),
-        ncores = 1
-    )
-    md$make_model(ncores = 1)
-    md
-}
-
 test_that("one-temperature MC3 exactly matches the original sampler", {
     md <- make_mc3_test_model()
     niter <- 100L
@@ -87,4 +76,24 @@ test_that("batched MC3 checkpoints and resumes heated states", {
     expect_equal(lengths(resumed_trace), c(`1` = 31L, `2` = 31L))
     expect_equal(resumed_checkpoint$completed_iters, 30L)
     expect_equal(sum(resumed_checkpoint$swap_attempts), 12L)
+})
+
+test_that("deferred checkpoints retain the complete final trace and diagnostics", {
+    md <- make_mc3_test_model()
+    outdir <- tempfile("mitodrift-checkpoint-cadence-")
+    dir.create(outdir)
+    trace_file <- file.path(outdir, "trace.qs2")
+    diag_file <- file.path(outdir, "diag.rds")
+
+    result <- mitodrift:::run_tree_mcmc_batch(
+        md$tree_init, md$logP, md$logA,
+        outfile = trace_file, diagfile = diag_file,
+        max_iter = 25L, nchains = 2L, ncores = 2L,
+        batch_size = 10L, checkpoint_every = 2L)
+
+    persisted <- qs2::qd_read(trace_file)
+    diagnostics <- readRDS(diag_file)
+    expect_equal(lengths(result), c(`1` = 26L, `2` = 26L))
+    expect_identical(persisted, result)
+    expect_equal(diagnostics$completed_iters, c(10L, 20L, 25L))
 })

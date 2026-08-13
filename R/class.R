@@ -291,6 +291,7 @@ MitoDrift <- R6::R6Class("MitoDrift",
         #'   enables Metropolis-coupled MCMC when supplied.
         #' @param mc3_swap_interval Iterations between adjacent-temperature swaps.
         #' @param mc3_statefile Optional heated-state checkpoint path.
+        #' @param checkpoint_every Persist trace/state every this many batches.
         #' @return MCMC result object
         run_mcmc = function(
             max_iter = 10000,
@@ -306,7 +307,8 @@ MitoDrift <- R6::R6Class("MitoDrift",
             diagfile = NULL,
             mc3_temperatures = NULL,
             mc3_swap_interval = 10L,
-            mc3_statefile = NULL
+            mc3_statefile = NULL,
+            checkpoint_every = 1L
         ) {
 
             if (!is.null(outfile)) {
@@ -354,7 +356,8 @@ MitoDrift <- R6::R6Class("MitoDrift",
                 diagfile = diagfile,
                 mc3_temperatures = mc3_temperatures,
                 mc3_swap_interval = mc3_swap_interval,
-                mc3_statefile = mc3_statefile
+                mc3_statefile = mc3_statefile,
+                checkpoint_every = checkpoint_every
             )
             
             message('Phylogenetic MCMC completed!')

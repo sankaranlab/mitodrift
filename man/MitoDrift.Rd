@@ -221,7 +221,8 @@ tree information, model parameters, and available components.
   diagfile = NULL,
   mc3_temperatures = NULL,
   mc3_swap_interval = 10L,
-  mc3_statefile = NULL
+  mc3_statefile = NULL,
+  checkpoint_every = 1L
 )}
     \if{html}{\out{</div>}}
   }
@@ -243,6 +244,7 @@ tree information, model parameters, and available components.
 enables Metropolis-coupled MCMC when supplied.}
       \item{\code{mc3_swap_interval}}{Iterations between adjacent-temperature swaps.}
       \item{\code{mc3_statefile}}{Optional heated-state checkpoint path.}
+      \item{\code{checkpoint_every}}{Persist trace/state every this many batches.}
     }
     \if{html}{\out{</div>}}
   }

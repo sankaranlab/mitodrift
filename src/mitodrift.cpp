@@ -471,6 +471,7 @@ struct NNICache {
 	// topology helpers
 	std::vector<int> parent_of;					// size n
 	std::vector< std::array<int,2> > children_of;		// for internal nodes: exactly two children
+    std::vector<int> internal_edge_indices;       // internal-edge ordinal -> position in E
 	// transition precompute
 	std::vector<double> row_maxA;				// size C
     arma::Mat<double> expA_shifted_t;    // stores exp(A) rows as columns (C x C)
@@ -596,6 +597,7 @@ struct NNICache {
 			if (children_of[p][0] == -1) children_of[p][0] = c;
 			else children_of[p][1] = c;
 		}
+        rebuild_internal_edge_indices();
 
 		// A precompute
         row_maxA.resize(C);
@@ -731,15 +733,17 @@ struct NNICache {
 		return (ch[0] == child) ? ch[1] : ch[0];
 	}
 
-    inline int locate_internal_edge_index(int edge_n) const {
-        int cnt = 0;
+    inline void rebuild_internal_edge_indices() {
+        internal_edge_indices.clear();
+        internal_edge_indices.reserve(static_cast<std::size_t>(nTips - 2));
         for (int i = 0; i < m; ++i) {
-            if (E[m + i] >= nTips) {
-                ++cnt;
-                if (cnt == edge_n) return i;
-            }
+            if (E[m + i] >= nTips) internal_edge_indices.push_back(i);
         }
-        return -1;
+    }
+
+    inline int locate_internal_edge_index(int edge_n) const {
+        if (edge_n < 1 || static_cast<std::size_t>(edge_n) > internal_edge_indices.size()) return -1;
+        return internal_edge_indices[static_cast<std::size_t>(edge_n - 1)];
     }
 
     inline void compute_F_vectorized(
@@ -985,6 +989,7 @@ struct NNICache {
         E1 = reorderRcpp(E1);
         E = E1 - 1;
         root = E(m - 1);
+        rebuild_internal_edge_indices();
 
         reset_staged_state_unlocked();
     }

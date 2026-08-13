@@ -519,12 +519,17 @@ safe_read_chain = function(path, ncores = 1) {
 #'   swaps of randomly selected adjacent temperatures.
 #' @param mc3_statefile Optional RDS checkpoint for heated-chain states and
 #'   swap statistics. Defaults to `paste0(outfile, ".mc3_state.rds")`.
+#' @param checkpoint_every Positive integer; persist the cumulative trace and
+#'   sampler state every this many diagnostic batches. The final batch is always
+#'   persisted. Values greater than one reduce I/O at the cost of re-running up
+#'   to `checkpoint_every - 1` batches after interruption.
 #' @return A list of edge-list chains (one list of edge matrices per chain).
 #' @keywords internal
 run_tree_mcmc_batch = function(
     phy_init, logP_list, logA_vec, outfile, diagfile = NULL, diag = TRUE, max_iter = 10000, nchains = 1, ncores = 1, ncores_qs = 1,
     batch_size = 1000, conv_thres = NULL, resume = FALSE,
-    mc3_temperatures = NULL, mc3_swap_interval = 10L, mc3_statefile = NULL
+    mc3_temperatures = NULL, mc3_swap_interval = 10L, mc3_statefile = NULL,
+    checkpoint_every = 1L
 ) {
 
     RhpcBLASctl::blas_set_num_threads(1)
@@ -533,6 +538,10 @@ run_tree_mcmc_batch = function(
 
     ncores_qs <- if (isTRUE(qs2:::check_TBB())) ncores_qs else 1L
     message('Using ', ncores_qs, ' cores for saving/writing MCMC trace')
+    checkpoint_every <- as.integer(checkpoint_every)
+    if (length(checkpoint_every) != 1L || is.na(checkpoint_every) || checkpoint_every < 1L) {
+        stop('checkpoint_every must be a positive integer')
+    }
 
     use_mc3 <- !is.null(mc3_temperatures)
     if (use_mc3) {
@@ -612,6 +621,11 @@ run_tree_mcmc_batch = function(
     }
 
     completed_iters = length(edge_list_all[[1]]) - 1L
+    if (nrow(diag_history) > 0L && 'completed_iters' %in% names(diag_history)) {
+        diag_history <- diag_history[diag_history$completed_iters <= completed_iters, , drop = FALSE]
+    }
+    asdsf_state <- initialize_target_tree_asdsf_state(
+        phy_init, edge_list_all, rooted = TRUE)
 
     if (is.null(conv_thres)) {
         remaining = max_iter - completed_iters
@@ -691,27 +705,19 @@ run_tree_mcmc_batch = function(
             )
         }
 
+        new_edge_list_chains <- vector('list', length(edge_list_all))
         for (chain_id in seq_along(edge_list_all)) {
             elist = restore_elist(elist_active[[chain_id]])
             if (length(elist) > 0) {
                 elist = elist[-1]
             }
+            new_edge_list_chains[[chain_id]] <- elist
             edge_list_all[[chain_id]] = c(edge_list_all[[chain_id]], elist)
         }
 
-        qs2::qd_save(edge_list_all, outfile, nthreads = ncores_qs)
-        if (use_mc3) {
-            mc3_checkpoint$completed_iters <- length(edge_list_all[[1]]) - 1L
-            saveRDS(mc3_checkpoint, mc3_statefile)
-        }
-
-        asdsf <- compute_target_tree_asdsf(
-            phy_target = phy_init,
-            edge_list_chains = edge_list_all,
-            min_freq = 0,
-            rooted = TRUE,
-            ncores = ncores
-        )
+        asdsf_state <- update_target_tree_asdsf_state(
+            asdsf_state, phy_init, new_edge_list_chains, rooted = TRUE)
+        asdsf <- target_tree_asdsf_from_state(asdsf_state, min_freq = 0)
         message('ASDSF (target clades) after ', batch_label, ': ', signif(asdsf, 4))
         if (!is.null(diagfile)) {
             diag_entry = data.frame(
@@ -723,9 +729,20 @@ run_tree_mcmc_batch = function(
                 } else NA_real_
             )
             diag_history = bind_rows(diag_history, diag_entry)
-            saveRDS(diag_history, diagfile)
         }
-        if (!is.null(conv_thres) && !is.na(asdsf) && asdsf <= conv_thres) {
+        converged <- !is.null(conv_thres) && !is.na(asdsf) && asdsf <= conv_thres
+        fixed_complete <- is.null(conv_thres) &&
+            length(edge_list_all[[1]]) - 1L >= max_iter
+        persist_batch <- batch_idx %% checkpoint_every == 0L || converged || fixed_complete
+        if (persist_batch) {
+            qs2::qd_save(edge_list_all, outfile, nthreads = ncores_qs)
+            if (use_mc3) {
+                mc3_checkpoint$completed_iters <- length(edge_list_all[[1]]) - 1L
+                saveRDS(mc3_checkpoint, mc3_statefile)
+            }
+            if (!is.null(diagfile)) saveRDS(diag_history, diagfile)
+        }
+        if (converged) {
             message('Convergence threshold (ASDSF) reached. Stopping MCMC.')
             break
         }
@@ -733,8 +750,6 @@ run_tree_mcmc_batch = function(
         batch_time <- proc.time() - ptm
         message(paste('Completed', batch_label, paste0('(', signif(batch_time[['elapsed']], 2), 's', ')')))
     }
-
-    qs2::qd_save(edge_list_all, outfile, nthreads = ncores_qs)
 
     return(edge_list_all)
 }

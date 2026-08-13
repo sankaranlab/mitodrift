@@ -187,6 +187,13 @@ option_list <- list(
         metavar = "LOGICAL"
     ),
     make_option(
+        c("--tree_mcmc_checkpoint_every"),
+        type = "integer",
+        default = 1L,
+        help = "Persist MCMC trace/state every N diagnostic batches (final batch always saved)",
+        metavar = "INTEGER"
+    ),
+    make_option(
         c("-z", "--conv_thres"),
         type = "double",
         default = NULL,
@@ -400,7 +407,8 @@ md$run_mcmc(
     resume = opts$resume,
     mc3_temperatures = opts$mc3_temperatures,
     mc3_swap_interval = opts$mc3_swap_interval,
-    mc3_statefile = file.path(opts$outdir, "tree_mc3_state.rds")
+    mc3_statefile = file.path(opts$outdir, "tree_mc3_state.rds"),
+    checkpoint_every = opts$tree_mcmc_checkpoint_every
 )
 
 saveRDS(md, mitodrift_object_file)

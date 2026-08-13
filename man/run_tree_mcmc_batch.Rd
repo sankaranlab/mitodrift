@@ -20,7 +20,8 @@ run_tree_mcmc_batch(
   resume = FALSE,
   mc3_temperatures = NULL,
   mc3_swap_interval = 10L,
-  mc3_statefile = NULL
+  mc3_statefile = NULL,
+  checkpoint_every = 1L
 )
 }
 \arguments{
@@ -64,6 +65,11 @@ swaps of randomly selected adjacent temperatures.}
 
 \item{mc3_statefile}{Optional RDS checkpoint for heated-chain states and
 swap statistics. Defaults to \code{paste0(outfile, ".mc3_state.rds")}.}
+
+\item{checkpoint_every}{Positive integer; persist the cumulative trace and
+sampler state every this many diagnostic batches. The final batch is always
+persisted. Values greater than one reduce I/O at the cost of re-running up
+to \code{checkpoint_every - 1} batches after interruption.}
 }
 \value{
 A list of edge-list chains (one list of edge matrices per chain).

@@ -14,18 +14,22 @@ compute_target_tree_asdsf(
 )
 }
 \arguments{
-\item{phy_target}{A rooted \code{phylo} object defining the reference clades. Assumed to be in postorder.}
+\item{phy_target}{A rooted \code{phylo} object defining the reference clades.}
 
-\item{edge_list_chains}{List of chains, each a list of edge matrices (2-column integer matrices).}
+\item{edge_list_chains}{List of chains, each a list of edge matrices.}
 
-\item{rooted}{Logical; treat trees as rooted when matching clades. Default \code{TRUE}.}
+\item{rooted}{Logical; treat trees as rooted when matching clades.}
 
-\item{normalize}{Logical; pass through to \code{prop_clades_par} (default \code{TRUE}).}
+\item{normalize}{Logical; compute normalized clade frequencies. Only \code{TRUE}
+is supported.}
 
-\item{min_freq}{Minimum clade frequency threshold used when averaging SDs. Default \code{0.1}.}
+\item{ncores}{Number of threads used for clade counting.}
+
+\item{min_freq}{Minimum clade frequency used when averaging SDs.}
 }
 \value{
-A list with elements \code{asdsf}, \code{per_clade_sd}, \code{keep_mask}, and \code{freq_matrix}.
+The average standard deviation of target-clade frequencies across
+chains.
 }
 \description{
 Compute ASDSF across chains using clades from a target tree
