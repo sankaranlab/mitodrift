@@ -79,3 +79,11 @@ tree_mcmc_parallel_seeded <- function(start_edges, logP, logA, max_iter_vec, see
     .Call('_mitodrift_tree_mcmc_parallel_seeded', PACKAGE = 'mitodrift', start_edges, logP, logA, max_iter_vec, seeds)
 }
 
+tree_mc3_parallel_seeded_serial <- function(start_edges, logP, logA, max_iter_vec, seeds, temperatures, swap_interval = 10L) {
+    .Call('_mitodrift_tree_mc3_parallel_seeded_serial', PACKAGE = 'mitodrift', start_edges, logP, logA, max_iter_vec, seeds, temperatures, swap_interval)
+}
+
+tree_mc3_parallel_seeded <- function(start_edges, logP, logA, max_iter_vec, seeds, temperatures, swap_interval = 10L) {
+    .Call('_mitodrift_tree_mc3_parallel_seeded', PACKAGE = 'mitodrift', start_edges, logP, logA, max_iter_vec, seeds, temperatures, swap_interval)
+}
+

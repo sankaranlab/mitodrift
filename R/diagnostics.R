@@ -1,13 +1,74 @@
 ## -----------------------------------------------------------------------------
+#' Initialize incremental target-clade counts
+#'
+#' @keywords internal
+#' @noRd
+initialize_target_tree_asdsf_state <- function(phy_target,
+                                                edge_list_chains,
+                                                rooted = TRUE) {
+    counts <- lapply(edge_list_chains, function(chain_edges) {
+        if (!length(chain_edges)) return(rep(0, phy_target$Nnode))
+        prop_clades_par(
+            E_target = phy_target$edge,
+            edges = chain_edges,
+            rooted = rooted,
+            normalize = FALSE
+        )
+    })
+    list(
+        counts = do.call(rbind, counts),
+        totals = lengths(edge_list_chains)
+    )
+}
+
+#' Update incremental target-clade counts
+#' @keywords internal
+#' @noRd
+update_target_tree_asdsf_state <- function(state, phy_target,
+                                            new_edge_list_chains,
+                                            rooted = TRUE) {
+    for (chain_id in seq_along(new_edge_list_chains)) {
+        chain_edges <- new_edge_list_chains[[chain_id]]
+        if (!length(chain_edges)) next
+        state$counts[chain_id, ] <- state$counts[chain_id, ] + prop_clades_par(
+            E_target = phy_target$edge,
+            edges = chain_edges,
+            rooted = rooted,
+            normalize = FALSE
+        )
+        state$totals[[chain_id]] <- state$totals[[chain_id]] + length(chain_edges)
+    }
+    state
+}
+
+#' Compute ASDSF from incremental target-clade counts
+#' @keywords internal
+#' @noRd
+target_tree_asdsf_from_state <- function(state, min_freq = 0) {
+    freq_matrix <- state$counts / pmax(state$totals, 1L)
+
+    if (nrow(freq_matrix) <= 1L) {
+        per_clade_sd <- rep(0, ncol(freq_matrix))
+    } else {
+        per_clade_sd <- apply(freq_matrix, 2, stats::sd)
+        per_clade_sd[is.na(per_clade_sd)] <- 0
+    }
+
+    keep_mask <- apply(freq_matrix, 2, function(vals) any(vals > min_freq))
+    if (!any(keep_mask)) 0 else mean(per_clade_sd[keep_mask])
+}
+
 #' Compute ASDSF across chains using clades from a target tree
 #'
-#' @param phy_target A rooted `phylo` object defining the reference clades. Assumed to be in postorder.
-#' @param edge_list_chains List of chains, each a list of edge matrices (2-column integer matrices).
-#' @param rooted Logical; treat trees as rooted when matching clades. Default `TRUE`.
-#' @param normalize Logical; pass through to `prop_clades_par` (default `TRUE`).
-#' @param min_freq Minimum clade frequency threshold used when averaging SDs. Default `0.1`.
-#'
-#' @return A list with elements `asdsf`, `per_clade_sd`, `keep_mask`, and `freq_matrix`.
+#' @param phy_target A rooted `phylo` object defining the reference clades.
+#' @param edge_list_chains List of chains, each a list of edge matrices.
+#' @param rooted Logical; treat trees as rooted when matching clades.
+#' @param normalize Logical; compute normalized clade frequencies. Only `TRUE`
+#'   is supported.
+#' @param ncores Number of threads used for clade counting.
+#' @param min_freq Minimum clade frequency used when averaging SDs.
+#' @return The average standard deviation of target-clade frequencies across
+#'   chains.
 #' @keywords internal
 compute_target_tree_asdsf <- function(phy_target,
                                       edge_list_chains,
@@ -23,48 +84,15 @@ compute_target_tree_asdsf <- function(phy_target,
         stop('`edge_list_chains` must be a non-empty list of chains')
     }
 
+    if (!isTRUE(normalize)) stop('ASDSF requires normalized clade frequencies')
+
 	RhpcBLASctl::blas_set_num_threads(1)
     RhpcBLASctl::omp_set_num_threads(1)
     RcppParallel::setThreadOptions(numThreads = ncores)
 
-    # Compute clade frequencies per chain relative to the target tree
-    freqs <- lapply(edge_list_chains, function(chain_edges) {
-        if (!length(chain_edges)) {
-            # No samples yet: return zeros for all target clades
-            return(rep(0, phy_target$Nnode))
-        }
-        prop_clades_par(
-            E_target = phy_target$edge,
-            edges = chain_edges,
-            rooted = rooted,
-            normalize = normalize
-        )
-    })
-
-    # Ensure all chains yield vectors of identical length
-    K <- length(freqs[[1]])
-    freq_matrix <- do.call(rbind, freqs)
-
-    if (ncol(freq_matrix) != K) {
-        stop('Mismatch in clade count across chains when computing ASDSF')
-    }
-
-    # Standard deviation per clade across chains (handle single-chain case)
-    if (nrow(freq_matrix) <= 1L) {
-        per_clade_sd <- rep(0, K)
-    } else {
-        per_clade_sd <- apply(freq_matrix, 2, stats::sd)
-        per_clade_sd[is.na(per_clade_sd)] <- 0
-    }
-
-    keep_mask <- apply(freq_matrix, 2, function(vals) any(vals > min_freq))
-    if (!any(keep_mask)) {
-        asdsf <- 0
-    } else {
-        asdsf <- mean(per_clade_sd[keep_mask])
-    }
-
-    return(asdsf)
+    state <- initialize_target_tree_asdsf_state(
+        phy_target, edge_list_chains, rooted = rooted)
+    target_tree_asdsf_from_state(state, min_freq = min_freq)
 }
 
 #' Compute clade retention curve from tree

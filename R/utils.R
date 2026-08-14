@@ -5,7 +5,7 @@
 #' @return A matrix of values
 #' @export
 long_to_mat = function(mut_dat_long, variable) {
-    as.data.table(mut_dat_long) %>%
+    data.table::as.data.table(mut_dat_long) %>%
         data.table::dcast(variant ~ cell, value.var = variable, fill = 0) %>%
         tibble::column_to_rownames("variant") %>%
         as.matrix()
@@ -25,8 +25,8 @@ mat_to_long = function(amat, dmat) {
     }
     
     # Convert to data.table and melt to long format
-    amat_dt <- as.data.table(amat, keep.rownames = "variant")
-    dmat_dt <- as.data.table(dmat, keep.rownames = "variant")
+    amat_dt <- data.table::as.data.table(amat, keep.rownames = "variant")
+    dmat_dt <- data.table::as.data.table(dmat, keep.rownames = "variant")
     
     # Melt both matrices to long format
     amat_long <- data.table::melt(amat_dt, id.vars = "variant", 
@@ -38,7 +38,7 @@ mat_to_long = function(amat, dmat) {
     result <- merge(amat_long, dmat_long, by = c("variant", "cell"))
     
     # Set column order
-    setcolorder(result, c("variant", "cell", "a", "d"))
+    data.table::setcolorder(result, c("variant", "cell", "a", "d"))
     
     return(result)
 }

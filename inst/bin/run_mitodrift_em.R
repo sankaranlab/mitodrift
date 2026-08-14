@@ -215,11 +215,39 @@ option_list <- list(
         metavar = "LOGICAL"
     ),
     make_option(
+        c("--tree_mcmc_checkpoint_every"),
+        type = "integer",
+        default = 1L,
+        help = "Persist MCMC trace/state every N diagnostic batches (final batch always saved)",
+        metavar = "INTEGER"
+    ),
+    make_option(
         c("-z", "--conv_thres"),
         type = "double",
         default = NULL,
         help = "Convergence threshold for ASDSF",
         metavar = "DOUBLE"
+    ),
+    make_option(
+        c("--mc3_temperatures"),
+        type = "character",
+        default = NULL,
+        help = "Comma-separated MC3 temperature ladder starting at 1; omitted uses independent MCMC",
+        metavar = "CHARACTER"
+    ),
+    make_option(
+        c("--mc3_swap_interval"),
+        type = "integer",
+        default = 10L,
+        help = "Iterations between MC3 adjacent-temperature swap proposals",
+        metavar = "INTEGER"
+    ),
+    make_option(
+        c("--mc3_ncores"),
+        type = "integer",
+        default = NULL,
+        help = "MC3 sampling threads; with allocated CPUs, use up to chains times temperatures",
+        metavar = "INTEGER"
     ),
     make_option(
         c("-r", "--resume"),
@@ -233,6 +261,11 @@ option_list <- list(
 opt_parser <- OptionParser(option_list = option_list)
 opts <- parse_args(opt_parser)
 
+if (!is.null(opts$mc3_temperatures)) {
+    opts$mc3_temperatures <- as.numeric(strsplit(opts$mc3_temperatures, ',', fixed = TRUE)[[1]])
+    if (anyNA(opts$mc3_temperatures)) stop('--mc3_temperatures must be comma-separated numbers')
+}
+
 # Default annotation cores to ncores if not set.
 if (is.na(opts$ncores_annot)) {
     opts$ncores_annot <- opts$ncores
@@ -241,7 +274,8 @@ if (is.na(opts$ncores_annot)) {
 # Print parameters
 message("=== MitoDrift Analysis Parameters ===")
 for (arg in names(opts)) {
-    message(paste0(arg, ": ", opts[[arg]]))
+    value <- opts[[arg]]
+    message(arg, ": ", if (length(value) > 1L) paste(value, collapse = ",") else value)
 }
 if (opts$resume) {
     message("RESUME MODE: Will attempt to resume from existing files")
@@ -409,7 +443,12 @@ md$run_mcmc(
     conv_thres = opts$conv_thres,
     outfile = mcmc_trace_file,
     diagfile = mcmc_diag_file,
-    resume = opts$resume
+    resume = opts$resume,
+    mc3_temperatures = opts$mc3_temperatures,
+    mc3_swap_interval = opts$mc3_swap_interval,
+    mc3_ncores = opts$mc3_ncores,
+    mc3_statefile = file.path(opts$outdir, "tree_mc3_state.rds"),
+    checkpoint_every = opts$tree_mcmc_checkpoint_every
 )
 
 saveRDS(md, mitodrift_object_file)

@@ -1,3 +1,4 @@
-library(scistreer)
+library(testthat)
+library(mitodrift)
 
-testthat::test_check("scistreer")
+test_check("mitodrift")
