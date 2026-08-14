@@ -17,7 +17,7 @@ test_that("incremental ASDSF matches a full-history recomputation", {
     )
 })
 
-test_that("convergence mode respects the maximum iteration cap", {
+test_that("convergence mode is not capped by max_iter", {
     md <- make_mc3_test_model()
     outdir <- tempfile("mitodrift-convergence-cap-")
     dir.create(outdir)
@@ -26,10 +26,9 @@ test_that("convergence mode respects the maximum iteration cap", {
         md$tree_init, md$logP, md$logA,
         outfile = file.path(outdir, "trace.qs2"),
         diagfile = file.path(outdir, "diag.rds"),
-        max_iter = 25L, conv_thres = -1, nchains = 2L, ncores = 2L,
+        max_iter = 1L, conv_thres = 1, nchains = 2L, ncores = 2L,
         batch_size = 10L)
 
-    expect_equal(lengths(result), c(`1` = 26L, `2` = 26L))
-    expect_equal(readRDS(file.path(outdir, "diag.rds"))$completed_iters,
-                 c(10L, 20L, 25L))
+    expect_equal(lengths(result), c(`1` = 11L, `2` = 11L))
+    expect_equal(readRDS(file.path(outdir, "diag.rds"))$completed_iters, 10L)
 })

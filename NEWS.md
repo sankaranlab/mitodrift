@@ -11,7 +11,8 @@
 - Add configurable MCMC persistence cadence through `checkpoint_every` and
   `--tree_mcmc_checkpoint_every`; final traces are always persisted.
 - Cache internal-edge ordinal lookup in the NNI proposal engine.
-- Enforce `max_iter` as a safety cap when using convergence-threshold mode.
+- Treat `conv_thres` as the sole stopping condition in convergence mode;
+  `max_iter` only controls fixed-iteration runs.
 - Update MC3 ensemble-temperature pairs concurrently with a flattened
   `RcppParallel` schedule and independent per-pair RNG streams; add
   `mc3_ncores` to use the additional allocated CPUs.

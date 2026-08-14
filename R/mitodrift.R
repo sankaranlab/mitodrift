@@ -664,12 +664,8 @@ run_tree_mcmc_batch = function(
                 message('Last recorded ASDSF: ', signif(last_asdsf, 4))
             }
         }
-        if (completed_iters >= max_iter) {
-            message('Maximum iterations already reached without satisfying the convergence threshold.')
-            return(edge_list_all)
-        }
         message('Running MCMC with ', length(chains), ' chains until ASDSF <= ', conv_thres,
-                ' or ', max_iter, ' iterations (batch size ', batch_size, ')')
+                ' (batch size ', batch_size, '; no iteration cap)')
     }
 
     batch_idx = 0L
@@ -685,12 +681,7 @@ run_tree_mcmc_batch = function(
             iter_this_batch = min(batch_size, remaining)
             batch_label = paste('batch', batch_idx + 1L, '; remaining:', ceiling(remaining / batch_size))
         } else {
-            remaining = max_iter - completed_iters
-            if (remaining <= 0L) {
-                message('Maximum iterations reached without satisfying the convergence threshold.')
-                break
-            }
-            iter_this_batch = min(batch_size, remaining)
+            iter_this_batch = batch_size
             batch_label = paste('batch', batch_idx + 1L)
         }
 
@@ -758,7 +749,8 @@ run_tree_mcmc_batch = function(
             diag_history = bind_rows(diag_history, diag_entry)
         }
         converged <- !is.null(conv_thres) && !is.na(asdsf) && asdsf <= conv_thres
-        fixed_complete <- length(edge_list_all[[1]]) - 1L >= max_iter
+        fixed_complete <- is.null(conv_thres) &&
+            length(edge_list_all[[1]]) - 1L >= max_iter
         persist_batch <- batch_idx %% checkpoint_every == 0L || converged || fixed_complete
         if (persist_batch) {
             qs2::qd_save(edge_list_all, outfile, nthreads = ncores_qs)
@@ -772,11 +764,6 @@ run_tree_mcmc_batch = function(
             message('Convergence threshold (ASDSF) reached. Stopping MCMC.')
             break
         }
-        if (fixed_complete) {
-            message('Maximum iterations reached without satisfying the convergence threshold.')
-            break
-        }
-
         batch_time <- proc.time() - ptm
         message(paste('Completed', batch_label, paste0('(', signif(batch_time[['elapsed']], 2), 's', ')')))
     }
