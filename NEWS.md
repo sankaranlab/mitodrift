@@ -11,3 +11,4 @@
 - Add configurable MCMC persistence cadence through `checkpoint_every` and
   `--tree_mcmc_checkpoint_every`; final traces are always persisted.
 - Cache internal-edge ordinal lookup in the NNI proposal engine.
+- Enforce `max_iter` as a safety cap when using convergence-threshold mode.
