@@ -1634,65 +1634,6 @@ struct MC3UpdateWorker : public Worker {
     }
 };
 
-struct MC3SwapWorker : public Worker {
-    std::size_t ntemps;
-    int boundary_iter;
-    const std::vector<int>& max_iter_vec;
-    const std::vector<double>& temperatures;
-    std::vector<std::unique_ptr<NNICache>>& caches;
-    std::vector<double>& loglik;
-    std::vector<std::mt19937>& swap_rngs;
-    std::vector<std::vector<arma::Col<int>>>& cold_traces;
-    std::vector<int>& swap_attempts;
-    std::vector<int>& swap_accepts;
-
-    MC3SwapWorker(
-        std::size_t ntemps,
-        int boundary_iter,
-        const std::vector<int>& max_iter_vec,
-        const std::vector<double>& temperatures,
-        std::vector<std::unique_ptr<NNICache>>& caches,
-        std::vector<double>& loglik,
-        std::vector<std::mt19937>& swap_rngs,
-        std::vector<std::vector<arma::Col<int>>>& cold_traces,
-        std::vector<int>& swap_attempts,
-        std::vector<int>& swap_accepts)
-        : ntemps(ntemps), boundary_iter(boundary_iter), max_iter_vec(max_iter_vec),
-          temperatures(temperatures), caches(caches), loglik(loglik),
-          swap_rngs(swap_rngs), cold_traces(cold_traces),
-          swap_attempts(swap_attempts), swap_accepts(swap_accepts) {}
-
-    void operator()(std::size_t begin, std::size_t end) {
-        for (std::size_t ensemble = begin; ensemble < end; ++ensemble) {
-            if (max_iter_vec[ensemble] < boundary_iter) continue;
-
-            std::mt19937& gen = swap_rngs[ensemble];
-            std::uniform_int_distribution<> pair_dist(
-                0, static_cast<int>(ntemps) - 2);
-            std::uniform_real_distribution<> uniform(0.0, 1.0);
-            const int pair = pair_dist(gen);
-            const int next = pair + 1;
-            const std::size_t first_task = ensemble * ntemps + static_cast<std::size_t>(pair);
-            const std::size_t second_task = first_task + 1;
-            const double beta_i = 1.0 / temperatures[static_cast<std::size_t>(pair)];
-            const double beta_j = 1.0 / temperatures[static_cast<std::size_t>(next)];
-            const double log_alpha = (beta_i - beta_j) *
-                (loglik[second_task] - loglik[first_task]);
-            const std::size_t stat_index = ensemble * (ntemps - 1) +
-                static_cast<std::size_t>(pair);
-            swap_attempts[stat_index]++;
-            if (std::log(uniform(gen)) < log_alpha) {
-                std::swap(caches[first_task], caches[second_task]);
-                std::swap(loglik[first_task], loglik[second_task]);
-                swap_accepts[stat_index]++;
-            }
-            // The serial implementation records the cold state after a swap.
-            cold_traces[ensemble][static_cast<std::size_t>(boundary_iter)] =
-                caches[ensemble * ntemps]->E + 1;
-        }
-    }
-};
-
 // [[Rcpp::export]]
 List tree_mc3_parallel_seeded(
     std::vector<std::vector<arma::Col<int>>> start_edges,
@@ -1804,10 +1745,36 @@ List tree_mc3_parallel_seeded(
 
         const int swap_boundary = block_start + swap_interval;
         if (swap_boundary <= longest_chain) {
-            MC3SwapWorker swap_worker(
-                ntemps, swap_boundary, max_iter_vec, temperatures, caches, loglik,
-                swap_rngs, cold_traces, swap_attempts, swap_accepts);
-            parallelFor(0, nchains, swap_worker);
+            // Updates have reached the barrier. Swaps are tiny and ensembles
+            // are independent, so handle them directly instead of launching a
+            // second task arena at every swap interval.
+            for (std::size_t ensemble = 0; ensemble < nchains; ++ensemble) {
+                if (max_iter_vec[ensemble] < swap_boundary) continue;
+                std::mt19937& gen = swap_rngs[ensemble];
+                std::uniform_int_distribution<> pair_dist(
+                    0, static_cast<int>(ntemps) - 2);
+                std::uniform_real_distribution<> uniform(0.0, 1.0);
+                const int pair = pair_dist(gen);
+                const int next = pair + 1;
+                const std::size_t first_task =
+                    ensemble * ntemps + static_cast<std::size_t>(pair);
+                const std::size_t second_task = first_task + 1;
+                const double beta_i = 1.0 / temperatures[static_cast<std::size_t>(pair)];
+                const double beta_j = 1.0 / temperatures[static_cast<std::size_t>(next)];
+                const double log_alpha = (beta_i - beta_j) *
+                    (loglik[second_task] - loglik[first_task]);
+                const std::size_t stat_index = ensemble * (ntemps - 1) +
+                    static_cast<std::size_t>(pair);
+                swap_attempts[stat_index]++;
+                if (std::log(uniform(gen)) < log_alpha) {
+                    std::swap(caches[first_task], caches[second_task]);
+                    std::swap(loglik[first_task], loglik[second_task]);
+                    swap_accepts[stat_index]++;
+                }
+                // The serial implementation records the cold state after a swap.
+                cold_traces[ensemble][static_cast<std::size_t>(swap_boundary)] =
+                    caches[ensemble * ntemps]->E + 1;
+            }
         }
     }
 
