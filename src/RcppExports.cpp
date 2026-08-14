@@ -39,8 +39,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // get_leaf_liks_mat_cpp
-List get_leaf_liks_mat_cpp(const IntegerMatrix& amat, const IntegerMatrix& dmat, const NumericVector& vafs, double eps, int ncores, bool log);
-RcppExport SEXP _mitodrift_get_leaf_liks_mat_cpp(SEXP amatSEXP, SEXP dmatSEXP, SEXP vafsSEXP, SEXP epsSEXP, SEXP ncoresSEXP, SEXP logSEXP) {
+List get_leaf_liks_mat_cpp(const IntegerMatrix& amat, const IntegerMatrix& dmat, const NumericVector& vafs, double eps, int ncores, bool log, double contamination_rate, Nullable<NumericVector> global_vaf);
+RcppExport SEXP _mitodrift_get_leaf_liks_mat_cpp(SEXP amatSEXP, SEXP dmatSEXP, SEXP vafsSEXP, SEXP epsSEXP, SEXP ncoresSEXP, SEXP logSEXP, SEXP contamination_rateSEXP, SEXP global_vafSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -50,7 +50,9 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type eps(epsSEXP);
     Rcpp::traits::input_parameter< int >::type ncores(ncoresSEXP);
     Rcpp::traits::input_parameter< bool >::type log(logSEXP);
-    rcpp_result_gen = Rcpp::wrap(get_leaf_liks_mat_cpp(amat, dmat, vafs, eps, ncores, log));
+    Rcpp::traits::input_parameter< double >::type contamination_rate(contamination_rateSEXP);
+    Rcpp::traits::input_parameter< Nullable<NumericVector> >::type global_vaf(global_vafSEXP);
+    rcpp_result_gen = Rcpp::wrap(get_leaf_liks_mat_cpp(amat, dmat, vafs, eps, ncores, log, contamination_rate, global_vaf));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -205,7 +207,7 @@ END_RCPP
 static const R_CallMethodDef CallEntries[] = {
     {"_mitodrift_prop_clades_par", (DL_FUNC) &_mitodrift_prop_clades_par, 4},
     {"_mitodrift_compute_node_edge_stats_bp2", (DL_FUNC) &_mitodrift_compute_node_edge_stats_bp2, 3},
-    {"_mitodrift_get_leaf_liks_mat_cpp", (DL_FUNC) &_mitodrift_get_leaf_liks_mat_cpp, 6},
+    {"_mitodrift_get_leaf_liks_mat_cpp", (DL_FUNC) &_mitodrift_get_leaf_liks_mat_cpp, 8},
     {"_mitodrift_reorderRcpp", (DL_FUNC) &_mitodrift_reorderRcpp, 1},
     {"_mitodrift_nnin_cpp", (DL_FUNC) &_mitodrift_nnin_cpp, 2},
     {"_mitodrift_logSumExp", (DL_FUNC) &_mitodrift_logSumExp, 1},

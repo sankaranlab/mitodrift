@@ -7,10 +7,12 @@
 #' @field leaf_likelihoods List of leaf likelihoods
 #' @field logA Vector of log transition probabilities
 #' @field logP List of log probabilities
-#' @field model_params Named vector containing model parameters (eps, err, npop, ngen, k)
+#' @field model_params Named vector containing model parameters (eps, err,
+#'   contamination_rate, npop, ngen, k)
 #' @field amat Alternative allele count matrix
 #' @field dmat Total depth matrix  
 #' @field vmat VAF matrix
+#' @field global_vaf Depth-weighted pooled VAF for each variant
 #' @field mcmc_trace MCMC trace for parameter fitting
 #' @field tree_list List of trees from optimization
 #' @field tree_ml Maximum likelihood tree
@@ -31,6 +33,7 @@ MitoDrift <- R6::R6Class("MitoDrift",
         amat = NULL,
         dmat = NULL,
         vmat = NULL,
+        global_vaf = NULL,
         model_params = c('k' = 20, 'npop' = 600),
         mcmc_trace = NULL,
         tree_list = NULL,
@@ -57,6 +60,10 @@ MitoDrift <- R6::R6Class("MitoDrift",
             
             # Set model parameters if complete
             if (!is.null(model_params) && all(c("eps", "err", "npop", "ngen", "k") %in% names(model_params))) {
+                if (!"contamination_rate" %in% names(model_params)) {
+                    model_params <- c(model_params, contamination_rate = 0)
+                }
+                .validate_contamination_rate(model_params[["contamination_rate"]])
                 self$model_params <- model_params
             }
 
@@ -156,6 +163,14 @@ MitoDrift <- R6::R6Class("MitoDrift",
                 stop("Model parameters must contain eps, err, npop, ngen, k")
             }
 
+            if (!"contamination_rate" %in% names(self$model_params)) {
+                self$model_params <- c(self$model_params, contamination_rate = 0)
+            }
+            contamination_rate <- .validate_contamination_rate(
+                self$model_params[["contamination_rate"]]
+            )
+            self$global_vaf <- .compute_global_vaf(self$amat, self$dmat)
+
             # Get transition matrix
             self$A <- get_transition_mat_wf_hmm(
                 k = self$model_params["k"], 
@@ -170,7 +185,9 @@ MitoDrift <- R6::R6Class("MitoDrift",
                 self$dmat, 
                 get_vaf_bins(k = self$model_params["k"]), 
                 eps = self$model_params["err"], 
-                log = TRUE
+                log = TRUE,
+                contamination_rate = contamination_rate,
+                global_vaf = self$global_vaf
             )
             
             # Convert to log probabilities
@@ -186,7 +203,12 @@ MitoDrift <- R6::R6Class("MitoDrift",
         #' @param max_iter Maximum number of EM iterations (default: 10)
         #' @param epsilon Convergence threshold (default: 1e-3)
         #' @param ncores Number of cores to use (default: 3)
-        #' @param trace Whether to return trace of parameter values (default: TRUE)
+        #' @param fit_contamination Whether to estimate a global contamination
+        #'   rate in the emission M-step (default: FALSE)
+        #' @param contamination_bounds Lower and upper bounds for the fitted
+        #'   contamination rate
+        #' @param emission_ecm_steps Number of conditional emission updates per
+        #'   EM iteration
         #' @return Fitted parameters or list of parameters and trace
         fit_params_em = function(
             tree_fit,
@@ -195,12 +217,23 @@ MitoDrift <- R6::R6Class("MitoDrift",
             upper_bounds = c('ngen' = 1000, 'log_eps' = log(0.2), 'log_err' = log(0.2)),
             max_iter = 10,
             epsilon = 1e-3,
-            ncores = 1
+            ncores = 1,
+            fit_contamination = FALSE,
+            contamination_bounds = c(0, 0.2),
+            emission_ecm_steps = 1L
         ) {
             
             message("Fitting tree parameters using EM with ", ncores, " cores")
             
-            # Run EM parameter fitting using the existing function
+            if (!"contamination_rate" %in% names(self$model_params)) {
+                self$model_params <- c(self$model_params, contamination_rate = 0)
+            }
+            contamination_rate <- .validate_contamination_rate(
+                self$model_params[["contamination_rate"]]
+            )
+            self$global_vaf <- .compute_global_vaf(self$amat, self$dmat)
+
+            # Run EM parameter fitting
             params_est <- fit_params_em_cpp(
                 tree_fit = tree_fit,
                 amat = self$amat,
@@ -213,11 +246,16 @@ MitoDrift <- R6::R6Class("MitoDrift",
                 npop = self$model_params["npop"],
                 ncores = ncores,
                 epsilon = epsilon,
-                trace = FALSE
+                trace = FALSE,
+                contamination_rate = contamination_rate,
+                fit_contamination = fit_contamination,
+                contamination_bounds = contamination_bounds,
+                global_vaf = self$global_vaf,
+                emission_ecm_steps = emission_ecm_steps
             )
 
             # Update model parameters with fitted values
-            for (param in c('ngen', 'eps', 'err')) {
+            for (param in intersect(c('ngen', 'eps', 'err', 'contamination_rate'), names(params_est))) {
                 self$model_params[param] <- params_est[param]
             }
             
@@ -442,4 +480,4 @@ MitoDrift <- R6::R6Class("MitoDrift",
     private = list(
         # Private methods can be added here if needed
     )
-) 
+)

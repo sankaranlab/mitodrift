@@ -117,6 +117,34 @@ option_list <- list(
         metavar = "DOUBLE"
     ),
     make_option(
+        c("--contamination_rate"),
+        type = "double",
+        default = 0,
+        help = "Global mitochondrial transfer/cross-contamination fraction (default: 0)",
+        metavar = "DOUBLE"
+    ),
+    make_option(
+        c("--fit_contamination"),
+        type = "logical",
+        default = FALSE,
+        help = "Whether to estimate contamination_rate during EM (default: FALSE)",
+        metavar = "LOGICAL"
+    ),
+    make_option(
+        c("--contamination_max"),
+        type = "double",
+        default = 0.2,
+        help = "Upper bound for contamination_rate during EM (default: 0.2)",
+        metavar = "DOUBLE"
+    ),
+    make_option(
+        c("--contamination_ecm_steps"),
+        type = "integer",
+        default = 1,
+        help = "Conditional err/contamination updates per EM iteration (default: 1)",
+        metavar = "INTEGER"
+    ),
+    make_option(
         c("-g", "--ngen"),
         type = "integer",
         default = 100,
@@ -312,6 +340,7 @@ if (opts$resume) {
     model_params <- c(
         eps = opts$eps,
         err = opts$err,
+        contamination_rate = opts$contamination_rate,
         npop = opts$npop,
         ngen = opts$ngen,
         k = opts$k
@@ -343,7 +372,10 @@ if (!(!is.null(md$logP) && !is.null(md$logA))) {
             tree_fit = md$tree_init,
             max_iter = opts$fit_param_max_iter,
             epsilon = opts$fit_param_epsilon,
-            ncores = opts$ncores_em
+            ncores = opts$ncores_em,
+            fit_contamination = opts$fit_contamination,
+            contamination_bounds = c(0, opts$contamination_max),
+            emission_ecm_steps = opts$contamination_ecm_steps
         )
     } else {
         message("\n=== Skipping parameter fitting ===")

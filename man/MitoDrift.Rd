@@ -24,13 +24,16 @@ A class for mitochondrial drift analysis with tree-based inference
 
 \item{\code{logP}}{List of log probabilities}
 
-\item{\code{model_params}}{Named vector containing model parameters (eps, err, npop, ngen, k)}
+\item{\code{model_params}}{Named vector containing model parameters (eps, err,
+contamination_rate, npop, ngen, k)}
 
 \item{\code{amat}}{Alternative allele count matrix}
 
 \item{\code{dmat}}{Total depth matrix}
 
 \item{\code{vmat}}{VAF matrix}
+
+\item{\code{global_vaf}}{Depth-weighted pooled VAF for each variant}
 
 \item{\code{mcmc_trace}}{MCMC trace for parameter fitting}
 
@@ -149,7 +152,10 @@ Fit tree parameters using Expectation-Maximization (EM) algorithm
   upper_bounds = c(ngen = 1000, log_eps = log(0.2), log_err = log(0.2)),
   max_iter = 10,
   epsilon = 0.001,
-  ncores = 1
+  ncores = 1,
+  fit_contamination = FALSE,
+  contamination_bounds = c(0, 0.2),
+  emission_ecm_steps = 1L
 )}\if{html}{\out{</div>}}
 }
 
@@ -170,7 +176,14 @@ Fit tree parameters using Expectation-Maximization (EM) algorithm
 
 \item{\code{ncores}}{Number of cores to use (default: 3)}
 
-\item{\code{trace}}{Whether to return trace of parameter values (default: TRUE)}
+\item{\code{fit_contamination}}{Whether to estimate a global contamination
+rate in the emission M-step (default: FALSE)}
+
+\item{\code{contamination_bounds}}{Lower and upper bounds for the fitted
+contamination rate}
+
+\item{\code{emission_ecm_steps}}{Number of conditional emission updates per
+EM iteration}
 }
 \if{html}{\out{</div>}}
 }

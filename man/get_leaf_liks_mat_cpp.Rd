@@ -4,7 +4,16 @@
 \alias{get_leaf_liks_mat_cpp}
 \title{Leaf likelihood matrix via C++ backend}
 \usage{
-get_leaf_liks_mat_cpp(amat, dmat, vafs, eps = 0, ncores = 1L, log = FALSE)
+get_leaf_liks_mat_cpp(
+  amat,
+  dmat,
+  vafs,
+  eps = 0,
+  ncores = 1L,
+  log = FALSE,
+  contamination_rate = 0,
+  global_vaf = NULL
+)
 }
 \arguments{
 \item{amat}{Integer matrix of alt counts (variants x cells).}
@@ -18,6 +27,12 @@ get_leaf_liks_mat_cpp(amat, dmat, vafs, eps = 0, ncores = 1L, log = FALSE)
 \item{ncores}{Number of threads to use (default 1).}
 
 \item{log}{Whether to return log-likelihoods instead of probabilities.}
+
+\item{contamination_rate}{Fraction of the effective VAF contributed by the
+global contamination pool (default 0).}
+
+\item{global_vaf}{Numeric vector containing one pooled VAF per variant.
+Required when \code{contamination_rate} is greater than zero.}
 }
 \value{
 List of matrices, one per variant, with rows = VAF bins and columns = cells.

@@ -10,6 +10,10 @@ using namespace Rcpp;
 //' @param eps Variant detection error rate to add to each VAF bin (default 0).
 //' @param ncores Number of threads to use (default 1).
 //' @param log Whether to return log-likelihoods instead of probabilities.
+//' @param contamination_rate Fraction of the effective VAF contributed by the
+//'   global contamination pool (default 0).
+//' @param global_vaf Numeric vector containing one pooled VAF per variant.
+//'   Required when `contamination_rate` is greater than zero.
 //' @return List of matrices, one per variant, with rows = VAF bins and columns = cells.
 //' @keywords internal
 // [[Rcpp::export]]
@@ -18,7 +22,9 @@ List get_leaf_liks_mat_cpp(const IntegerMatrix &amat,
 						   const NumericVector &vafs,
 						   double eps = 0.0,
 						   int ncores = 1,
-						   bool log = false) {
+						   bool log = false,
+						   double contamination_rate = 0.0,
+						   Nullable<NumericVector> global_vaf = R_NilValue) {
 
 	// dims check
 	if (amat.nrow() != dmat.nrow() || amat.ncol() != dmat.ncol()) {
@@ -28,13 +34,35 @@ List get_leaf_liks_mat_cpp(const IntegerMatrix &amat,
 	const int nvars  = amat.nrow();     // #variants
 	const int ncells = amat.ncol();     // #cells
 	const int nrow   = nvars;           // for column-major indexing
+	if (!R_finite(contamination_rate) || contamination_rate < 0.0 || contamination_rate > 1.0) {
+		stop("contamination_rate must be one finite value in [0, 1]");
+	}
 
-	// p <- pmin(vafs + eps, 1 - eps)
+	const bool use_contamination = contamination_rate > 0.0;
+	NumericVector global;
+	if (use_contamination) {
+		if (global_vaf.isNull()) {
+			stop("global_vaf is required when contamination_rate is greater than zero");
+		}
+		global = as<NumericVector>(global_vaf);
+		if (global.size() != nvars) {
+			stop("global_vaf must contain one value per variant");
+		}
+		for (int i = 0; i < nvars; ++i) {
+			if (!R_finite(global[i]) || global[i] < 0.0 || global[i] > 1.0) {
+				stop("global_vaf values must be finite and in [0, 1]");
+			}
+		}
+	}
+
+	// Preserve the original zero-contamination calculation exactly.
 	std::vector<double> p(K);
 	const double cap = 1.0 - eps;
-	for (int k = 0; k < K; ++k) {
-		double pk = vafs[k] + eps;
-		p[k] = (pk > cap) ? cap : pk;
+	if (!use_contamination) {
+		for (int k = 0; k < K; ++k) {
+			double pk = vafs[k] + eps;
+			p[k] = (pk > cap) ? cap : pk;
+		}
 	}
 
 	// raw pointers (column-major)
@@ -52,8 +80,19 @@ List get_leaf_liks_mat_cpp(const IntegerMatrix &amat,
 	dm[1] = cell_names;  // cols: cells
 
 	List out(nvars);
+	std::vector<double> p_variant(K);
 
 	for (int i = 0; i < nvars; ++i) {
+		if (use_contamination) {
+			for (int k = 0; k < K; ++k) {
+				double effective_vaf = (1.0 - contamination_rate) * vafs[k] +
+					contamination_rate * global[i];
+				double pk = effective_vaf + eps;
+				p_variant[k] = (pk > cap) ? cap : pk;
+			}
+		}
+		const std::vector<double> &p_current = use_contamination ? p_variant : p;
+
 		NumericMatrix m(K, ncells);      // rows=VAF bins, cols=cells
 		m.attr("dimnames") = dm;
 		double *M = m.begin();
@@ -67,7 +106,7 @@ List get_leaf_liks_mat_cpp(const IntegerMatrix &amat,
 			for (int k = 0; k < K; ++k) {
 				colptr[k] = R::dbinom(static_cast<double>(x),
 									  static_cast<double>(n),
-									  p[k],
+									  p_current[k],
 									  log ? 1 : 0);
 			}
 		}

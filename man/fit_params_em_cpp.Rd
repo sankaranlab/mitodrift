@@ -16,7 +16,12 @@ fit_params_em_cpp(
   npop = 600,
   ncores = 1,
   epsilon = 0.001,
-  trace = TRUE
+  trace = TRUE,
+  contamination_rate = 0,
+  fit_contamination = FALSE,
+  contamination_bounds = c(0, 0.2),
+  global_vaf = NULL,
+  emission_ecm_steps = 1L
 )
 }
 \arguments{
@@ -43,9 +48,23 @@ fit_params_em_cpp(
 \item{epsilon}{convergence threshold on parameter deltas}
 
 \item{trace}{if TRUE, returns trace dataframe}
+
+\item{contamination_rate}{Initial or fixed global contamination fraction.}
+
+\item{fit_contamination}{Whether to estimate \code{contamination_rate} in the
+emission M-step.}
+
+\item{contamination_bounds}{Lower and upper bounds for the contamination
+fraction.}
+
+\item{global_vaf}{Optional fixed pooled VAF vector, one value per variant.}
+
+\item{emission_ecm_steps}{Number of conditional emission maximization cycles
+per EM iteration when fitting contamination.}
 }
 \value{
-either named vector of final params (ngen, eps, err) or list(par=..., trace=...)
+Either a named vector of final parameters or a list with \code{par} and
+\code{trace}. The contamination rate is included when it is fitted or nonzero.
 }
 \description{
 A faster EM that uses compute_node_edge_beliefs_bp2() directly.

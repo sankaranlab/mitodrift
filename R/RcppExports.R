@@ -17,10 +17,14 @@ compute_node_edge_stats_bp2 <- function(E, logP_list, logA) {
 #' @param eps Variant detection error rate to add to each VAF bin (default 0).
 #' @param ncores Number of threads to use (default 1).
 #' @param log Whether to return log-likelihoods instead of probabilities.
+#' @param contamination_rate Fraction of the effective VAF contributed by the
+#'   global contamination pool (default 0).
+#' @param global_vaf Numeric vector containing one pooled VAF per variant.
+#'   Required when `contamination_rate` is greater than zero.
 #' @return List of matrices, one per variant, with rows = VAF bins and columns = cells.
 #' @keywords internal
-get_leaf_liks_mat_cpp <- function(amat, dmat, vafs, eps = 0.0, ncores = 1L, log = FALSE) {
-    .Call('_mitodrift_get_leaf_liks_mat_cpp', PACKAGE = 'mitodrift', amat, dmat, vafs, eps, ncores, log)
+get_leaf_liks_mat_cpp <- function(amat, dmat, vafs, eps = 0.0, ncores = 1L, log = FALSE, contamination_rate = 0.0, global_vaf = NULL) {
+    .Call('_mitodrift_get_leaf_liks_mat_cpp', PACKAGE = 'mitodrift', amat, dmat, vafs, eps, ncores, log, contamination_rate, global_vaf)
 }
 
 #' definitions for logSumExp function
