@@ -35,6 +35,32 @@ test_that("MC3 records adjacent swaps and returns valid cold and heated states",
     expect_true(all(is.finite(scores)))
 })
 
+test_that("MC3 cold samples match the exact posterior over five-tip topologies", {
+    md <- make_mc3_test_model(n_tips = 5L)
+    exact <- exact_rooted_topology_posterior(md)
+    expect_length(exact$trees, 105L)
+    expect_equal(sum(exact$probability), 1, tolerance = 1e-14)
+
+    temperatures <- c(1, 1.5, 2.25)
+    nchains <- 4L
+    niter <- 20000L
+    burnin <- 4000L
+    starts <- rep(
+        list(rep(list(md$tree_init$edge), length(temperatures))),
+        nchains)
+    coupled <- mitodrift:::tree_mc3_parallel_seeded(
+        starts, md$logP, md$logA,
+        rep(niter, nchains), seq_len(nchains), temperatures, 10L)
+    estimate <- estimate_topology_posterior(
+        coupled$traces, exact$keys, 5L, burnin)
+
+    total_variation <- 0.5 * sum(abs(estimate - exact$probability))
+    max_abs_error <- max(abs(estimate - exact$probability))
+    expect_lt(total_variation, 0.02)
+    expect_lt(max_abs_error, 0.01)
+    expect_gt(stats::cor(estimate, exact$probability), 0.999)
+})
+
 test_that("flattened MC3 RNG streams are deterministic across thread counts", {
     md <- make_mc3_test_model()
     temperatures <- c(1, 1.5, 2.25, 3.375)
