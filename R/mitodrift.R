@@ -514,9 +514,12 @@ safe_read_chain = function(path, ncores = 1) {
 #' @param resume Logical; if `TRUE`, resume from existing `outfile`.
 #' @param mc3_temperatures Optional numeric temperature ladder for
 #'   Metropolis-coupled MCMC. It must start at 1 and strictly increase. `NULL`
-#'   runs the original independent-chain sampler.
+#'   or the single value `1` runs the original independent-chain sampler.
 #' @param mc3_swap_interval Positive integer; iterations between proposed
 #'   swaps of randomly selected adjacent temperatures.
+#' @param mc3_ncores Optional number of sampling threads for MC3. Defaults to
+#'   `ncores`; set it up to `nchains * length(mc3_temperatures)` to update all
+#'   ensemble-temperature pairs concurrently when those CPUs are allocated.
 #' @param mc3_statefile Optional RDS checkpoint for heated-chain states and
 #'   swap statistics. Defaults to `paste0(outfile, ".mc3_state.rds")`.
 #' @param checkpoint_every Positive integer; persist the cumulative trace and
@@ -528,13 +531,13 @@ safe_read_chain = function(path, ncores = 1) {
 run_tree_mcmc_batch = function(
     phy_init, logP_list, logA_vec, outfile, diagfile = NULL, diag = TRUE, max_iter = 10000, nchains = 1, ncores = 1, ncores_qs = 1,
     batch_size = 1000, conv_thres = NULL, resume = FALSE,
-    mc3_temperatures = NULL, mc3_swap_interval = 10L, mc3_statefile = NULL,
+    mc3_temperatures = NULL, mc3_swap_interval = 10L, mc3_ncores = NULL,
+    mc3_statefile = NULL,
     checkpoint_every = 1L
 ) {
 
     RhpcBLASctl::blas_set_num_threads(1)
     RhpcBLASctl::omp_set_num_threads(1)
-    RcppParallel::setThreadOptions(numThreads = ncores)
 
     ncores_qs <- if (isTRUE(qs2:::check_TBB())) ncores_qs else 1L
     message('Using ', ncores_qs, ' cores for saving/writing MCMC trace')
@@ -543,20 +546,35 @@ run_tree_mcmc_batch = function(
         stop('checkpoint_every must be a positive integer')
     }
 
-    use_mc3 <- !is.null(mc3_temperatures)
-    if (use_mc3) {
+    mc3_requested <- !is.null(mc3_temperatures)
+    use_mc3 <- FALSE
+    if (mc3_requested) {
         mc3_temperatures <- as.numeric(mc3_temperatures)
-        if (length(mc3_temperatures) < 2L || mc3_temperatures[[1]] != 1 ||
+        if (length(mc3_temperatures) < 1L || mc3_temperatures[[1]] != 1 ||
             any(!is.finite(mc3_temperatures)) || any(diff(mc3_temperatures) <= 0)) {
-            stop('mc3_temperatures must contain at least two finite, strictly increasing values starting at 1')
+            stop('mc3_temperatures must contain finite, strictly increasing values starting at 1')
         }
+        use_mc3 <- length(mc3_temperatures) > 1L
         mc3_swap_interval <- as.integer(mc3_swap_interval)
         if (length(mc3_swap_interval) != 1L || is.na(mc3_swap_interval) || mc3_swap_interval < 1L) {
             stop('mc3_swap_interval must be a positive integer')
         }
-        if (is.null(mc3_statefile)) mc3_statefile <- paste0(outfile, '.mc3_state.rds')
+        if (use_mc3) {
+            if (is.null(mc3_statefile)) mc3_statefile <- paste0(outfile, '.mc3_state.rds')
+        } else {
+            message('A single MC3 temperature (1) uses the ordinary MCMC sampler')
+        }
+    }
+    sampling_ncores <- if (use_mc3 && !is.null(mc3_ncores)) mc3_ncores else ncores
+    sampling_ncores <- as.integer(sampling_ncores)
+    if (length(sampling_ncores) != 1L || is.na(sampling_ncores) || sampling_ncores < 1L) {
+        stop('mc3_ncores must be a positive integer when supplied')
+    }
+    RcppParallel::setThreadOptions(numThreads = sampling_ncores)
+    if (use_mc3) {
         message('MC3 enabled with temperatures: ', paste(mc3_temperatures, collapse = ', '),
-                '; adjacent swap interval: ', mc3_swap_interval)
+                '; adjacent swap interval: ', mc3_swap_interval,
+                '; sampling threads: ', sampling_ncores)
     }
 
     if (resume && !is.null(diagfile) && file.exists(diagfile)) {

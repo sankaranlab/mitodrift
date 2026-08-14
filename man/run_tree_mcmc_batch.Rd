@@ -20,6 +20,7 @@ run_tree_mcmc_batch(
   resume = FALSE,
   mc3_temperatures = NULL,
   mc3_swap_interval = 10L,
+  mc3_ncores = NULL,
   mc3_statefile = NULL,
   checkpoint_every = 1L
 )
@@ -58,10 +59,14 @@ below this threshold instead of using \code{max_iter}.}
 
 \item{mc3_temperatures}{Optional numeric temperature ladder for
 Metropolis-coupled MCMC. It must start at 1 and strictly increase. \code{NULL}
-runs the original independent-chain sampler.}
+or the single value \code{1} runs the original independent-chain sampler.}
 
 \item{mc3_swap_interval}{Positive integer; iterations between proposed
 swaps of randomly selected adjacent temperatures.}
+
+\item{mc3_ncores}{Optional number of sampling threads for MC3. Defaults to
+\code{ncores}; set it up to \code{nchains * length(mc3_temperatures)} to update all
+ensemble-temperature pairs concurrently when those CPUs are allocated.}
 
 \item{mc3_statefile}{Optional RDS checkpoint for heated-chain states and
 swap statistics. Defaults to \code{paste0(outfile, ".mc3_state.rds")}.}

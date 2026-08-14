@@ -221,6 +221,7 @@ tree information, model parameters, and available components.
   diagfile = NULL,
   mc3_temperatures = NULL,
   mc3_swap_interval = 10L,
+  mc3_ncores = NULL,
   mc3_statefile = NULL,
   checkpoint_every = 1L
 )}
@@ -243,6 +244,8 @@ tree information, model parameters, and available components.
       \item{\code{mc3_temperatures}}{Optional temperature ladder starting at 1;
 enables Metropolis-coupled MCMC when supplied.}
       \item{\code{mc3_swap_interval}}{Iterations between adjacent-temperature swaps.}
+      \item{\code{mc3_ncores}}{Optional MC3 sampling threads. With sufficient
+allocated CPUs, use up to \code{nchains * length(mc3_temperatures)}.}
       \item{\code{mc3_statefile}}{Optional heated-state checkpoint path.}
       \item{\code{checkpoint_every}}{Persist trace/state every this many batches.}
     }

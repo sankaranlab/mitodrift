@@ -215,6 +215,13 @@ option_list <- list(
         metavar = "INTEGER"
     ),
     make_option(
+        c("--mc3_ncores"),
+        type = "integer",
+        default = NULL,
+        help = "MC3 sampling threads; with allocated CPUs, use up to chains times temperatures",
+        metavar = "INTEGER"
+    ),
+    make_option(
         c("-r", "--resume"),
         type = "logical",
         default = FALSE,
@@ -407,6 +414,7 @@ md$run_mcmc(
     resume = opts$resume,
     mc3_temperatures = opts$mc3_temperatures,
     mc3_swap_interval = opts$mc3_swap_interval,
+    mc3_ncores = opts$mc3_ncores,
     mc3_statefile = file.path(opts$outdir, "tree_mc3_state.rds"),
     checkpoint_every = opts$tree_mcmc_checkpoint_every
 )

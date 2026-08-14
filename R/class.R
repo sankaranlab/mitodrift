@@ -290,6 +290,8 @@ MitoDrift <- R6::R6Class("MitoDrift",
         #' @param mc3_temperatures Optional temperature ladder starting at 1;
         #'   enables Metropolis-coupled MCMC when supplied.
         #' @param mc3_swap_interval Iterations between adjacent-temperature swaps.
+        #' @param mc3_ncores Optional MC3 sampling threads. With sufficient
+        #'   allocated CPUs, use up to `nchains * length(mc3_temperatures)`.
         #' @param mc3_statefile Optional heated-state checkpoint path.
         #' @param checkpoint_every Persist trace/state every this many batches.
         #' @return MCMC result object
@@ -307,6 +309,7 @@ MitoDrift <- R6::R6Class("MitoDrift",
             diagfile = NULL,
             mc3_temperatures = NULL,
             mc3_swap_interval = 10L,
+            mc3_ncores = NULL,
             mc3_statefile = NULL,
             checkpoint_every = 1L
         ) {
@@ -356,6 +359,7 @@ MitoDrift <- R6::R6Class("MitoDrift",
                 diagfile = diagfile,
                 mc3_temperatures = mc3_temperatures,
                 mc3_swap_interval = mc3_swap_interval,
+                mc3_ncores = mc3_ncores,
                 mc3_statefile = mc3_statefile,
                 checkpoint_every = checkpoint_every
             )

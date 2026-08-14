@@ -201,6 +201,23 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// tree_mc3_parallel_seeded_serial
+List tree_mc3_parallel_seeded_serial(std::vector<std::vector<arma::Col<int>>> start_edges, const std::vector<std::vector<double>>& logP, const std::vector<double>& logA, const std::vector<int>& max_iter_vec, const std::vector<int>& seeds, const std::vector<double>& temperatures, int swap_interval);
+RcppExport SEXP _mitodrift_tree_mc3_parallel_seeded_serial(SEXP start_edgesSEXP, SEXP logPSEXP, SEXP logASEXP, SEXP max_iter_vecSEXP, SEXP seedsSEXP, SEXP temperaturesSEXP, SEXP swap_intervalSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< std::vector<std::vector<arma::Col<int>>> >::type start_edges(start_edgesSEXP);
+    Rcpp::traits::input_parameter< const std::vector<std::vector<double>>& >::type logP(logPSEXP);
+    Rcpp::traits::input_parameter< const std::vector<double>& >::type logA(logASEXP);
+    Rcpp::traits::input_parameter< const std::vector<int>& >::type max_iter_vec(max_iter_vecSEXP);
+    Rcpp::traits::input_parameter< const std::vector<int>& >::type seeds(seedsSEXP);
+    Rcpp::traits::input_parameter< const std::vector<double>& >::type temperatures(temperaturesSEXP);
+    Rcpp::traits::input_parameter< int >::type swap_interval(swap_intervalSEXP);
+    rcpp_result_gen = Rcpp::wrap(tree_mc3_parallel_seeded_serial(start_edges, logP, logA, max_iter_vec, seeds, temperatures, swap_interval));
+    return rcpp_result_gen;
+END_RCPP
+}
 // tree_mc3_parallel_seeded
 List tree_mc3_parallel_seeded(std::vector<std::vector<arma::Col<int>>> start_edges, const std::vector<std::vector<double>>& logP, const std::vector<double>& logA, const std::vector<int>& max_iter_vec, const std::vector<int>& seeds, const std::vector<double>& temperatures, int swap_interval);
 RcppExport SEXP _mitodrift_tree_mc3_parallel_seeded(SEXP start_edgesSEXP, SEXP logPSEXP, SEXP logASEXP, SEXP max_iter_vecSEXP, SEXP seedsSEXP, SEXP temperaturesSEXP, SEXP swap_intervalSEXP) {
@@ -234,6 +251,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_mitodrift_nni_cpp_parallel_multi", (DL_FUNC) &_mitodrift_nni_cpp_parallel_multi, 3},
     {"_mitodrift_tree_mcmc_cpp_cached_threadsafe", (DL_FUNC) &_mitodrift_tree_mcmc_cpp_cached_threadsafe, 6},
     {"_mitodrift_tree_mcmc_parallel_seeded", (DL_FUNC) &_mitodrift_tree_mcmc_parallel_seeded, 5},
+    {"_mitodrift_tree_mc3_parallel_seeded_serial", (DL_FUNC) &_mitodrift_tree_mc3_parallel_seeded_serial, 7},
     {"_mitodrift_tree_mc3_parallel_seeded", (DL_FUNC) &_mitodrift_tree_mc3_parallel_seeded, 7},
     {NULL, NULL, 0}
 };
