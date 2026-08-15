@@ -40,13 +40,13 @@ obj_file <- file.path(outdir, "mitodrift_object.rds")
 trace_file <- file.path(outdir, "tree_mcmc_trace.qs2")
 
 if (!file.exists(obj_file)) stop(glue("mitodrift_object.rds not found in {outdir}"))
-if (!file.exists(trace_file)) stop(glue("tree_mcmc_trace.qs2 not found in {outdir}"))
 
 # Load data
 message("Loading mitodrift object...")
 md <- readRDS(obj_file)
 message("Loading MCMC trace...")
-res_batch <- qs2::qd_read(trace_file)
+res_batch <- mitodrift:::safe_read_chain(trace_file)
+if (is.null(res_batch)) stop(glue("tree_mcmc_trace.qs2 (or its .blocks/ directory) not found in {outdir}"))
 
 A <- md$A
 liks <- md$leaf_likelihoods %>% lapply(exp)

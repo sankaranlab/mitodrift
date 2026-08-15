@@ -473,19 +473,70 @@ attach_edges = function(phy, edges) {
 
 #' Safely read a qs2 chain file
 #'
-#' Reads a qs2-serialized chain file with error handling for truncated or
-#' missing files.
+#' Reads a chain trace with error handling for truncated or missing files.
+#' Understands two on-disk layouts and combines them transparently so every
+#' caller gets the same list-of-chains-of-trees object regardless of which
+#' one produced it:
+#'   - legacy: a single qs2 file at `path` holding the complete trace
+#'     (including the seed tree as each chain's first element). This is the
+#'     only format archived regression keys (`test_dat/keys/`) ever use, and
+#'     it is never rewritten or migrated -- only read.
+#'   - block-wise: a `<path>.blocks/` directory of small, numbered qs2 files,
+#'     each holding only the iterations added at that checkpoint. Written by
+#'     `run_tree_mcmc_batch()` going forward so each checkpoint is an append
+#'     (cost proportional to that checkpoint's batch, not the whole trace).
+#' If both exist (e.g. resuming a run that was started before block-wise
+#' writing existed), the legacy file is treated as an implicit first block
+#' and the numbered blocks are appended after it in order.
 #'
-#' @param path Character file path.
+#' @param path Character file path (same `outfile`/`trace_file` path used
+#'   everywhere else; the block directory, if any, is derived from it).
 #' @param ncores Integer; number of threads for `qs2::qd_read`.
-#' @return The deserialized object, or `NULL` on failure.
+#' @return A list of per-chain edge-list traces, or `NULL` if nothing is
+#'   found at `path` in either layout.
 #' @keywords internal
 #' @noRd
-safe_read_chain = function(path, ncores = 1) {
-    if (!file.exists(path)) return(NULL)
+trace_blocks_dir = function(path) paste0(path, '.blocks')
+
+#' @keywords internal
+#' @noRd
+list_trace_blocks = function(path) {
+    blocks_dir = trace_blocks_dir(path)
+    if (!dir.exists(blocks_dir)) return(character(0))
+    files = list.files(blocks_dir, pattern = '^[0-9]{8}\\.qs2$', full.names = TRUE)
+    sort(files)
+}
+
+#' @keywords internal
+#' @noRd
+read_qs2_file = function(path, ncores = 1) {
+    if (!file.exists(path) || dir.exists(path)) return(NULL)
     fi = file.info(path)
     if (is.na(fi$size) || fi$size <= 0) return(NULL)
     tryCatch(qs2::qd_read(path, nthreads = ncores), error = function(e) NULL)
+}
+
+#' @keywords internal
+#' @noRd
+safe_read_chain = function(path, ncores = 1) {
+    legacy = read_qs2_file(path, ncores = ncores)
+    block_files = list_trace_blocks(path)
+    if (length(block_files) == 0) return(legacy)
+
+    blocks = lapply(block_files, read_qs2_file, ncores = ncores)
+    blocks = Filter(Negate(is.null), blocks)
+    parts = if (is.null(legacy)) blocks else c(list(legacy), blocks)
+    if (length(parts) == 0) return(NULL)
+
+    nchains_here = max(vapply(parts, length, integer(1)))
+    combined = vector('list', nchains_here)
+    for (chain_id in seq_len(nchains_here)) {
+        combined[[chain_id]] = do.call(c, lapply(parts, function(part) {
+            if (chain_id <= length(part) && !is.null(part[[chain_id]])) part[[chain_id]] else list()
+        }))
+    }
+    names(combined) = as.character(seq_len(nchains_here))
+    combined
 }
 
 #' Run tree-topology MCMC in batches with convergence monitoring
@@ -497,8 +548,12 @@ safe_read_chain = function(path, ncores = 1) {
 #' @param phy_init A rooted `phylo` object used as the starting tree.
 #' @param logP_list List of log-probability vectors (one per locus).
 #' @param logA_vec Numeric vector of log transition probabilities.
-#' @param outfile File path for saving/resuming the full edge-list trace
-#'   (qs2 format).
+#' @param outfile File path identifying the trace (qs2 format). Checkpoints
+#'   are written as small per-checkpoint block files under `<outfile>.blocks/`
+#'   rather than rewriting one cumulative file; a legacy single file directly
+#'   at `outfile` (as archived regression keys use) is also still read
+#'   transparently. Use `safe_read_chain()` rather than `qs2::qd_read()`
+#'   directly to read a trace written by this function.
 #' @param diagfile Optional file path for saving convergence diagnostics
 #'   (RDS format).
 #' @param diag Logical; whether to compute diagnostics (currently unused,
@@ -522,11 +577,19 @@ safe_read_chain = function(path, ncores = 1) {
 #'   ensemble-temperature pairs concurrently when those CPUs are allocated.
 #' @param mc3_statefile Optional RDS checkpoint for heated-chain states and
 #'   swap statistics. Defaults to `paste0(outfile, ".mc3_state.rds")`.
-#' @param checkpoint_every Positive integer; persist the cumulative trace and
+#' @param checkpoint_every Positive integer; persist a new checkpoint and the
 #'   sampler state every this many diagnostic batches. The final batch is always
 #'   persisted. Values greater than one reduce I/O at the cost of re-running up
-#'   to `checkpoint_every - 1` batches after interruption.
-#' @return A list of edge-list chains (one list of edge matrices per chain).
+#'   to `checkpoint_every - 1` batches after interruption. Each checkpoint is
+#'   written as its own small block file (see `outfile`), so this cost no
+#'   longer grows with total run length.
+#' @param return_trace Logical; if `FALSE`, skip reconstructing the full
+#'   trace for the return value and return `NULL` instead. The checkpointed
+#'   file(s) on disk are unaffected either way. Set `FALSE` when the caller
+#'   only needs the on-disk trace (e.g. to avoid paying for a read-back that
+#'   would just be discarded).
+#' @return A list of edge-list chains (one list of edge matrices per chain),
+#'   or `NULL` when `return_trace = FALSE`.
 #' @keywords internal
 run_tree_mcmc_batch = function(
     phy_init, logP_list, logA_vec, outfile, diagfile = NULL, diag = TRUE, max_iter = 10000, nchains = 1, ncores = 1, ncores_qs = 1,
@@ -590,6 +653,19 @@ run_tree_mcmc_batch = function(
 
     if (!dir.exists(outdir)) {
         dir.create(outdir, recursive = TRUE)
+    }
+
+    blocks_dir = trace_blocks_dir(outfile)
+    if (!resume) {
+        # A fresh run must never build on whatever happens to already be at
+        # `outfile` -- e.g. a leftover trace from an earlier, unrelated run
+        # at the same path. Clear both possible layouts so this run starts
+        # from a genuinely empty slate rather than silently combining with
+        # stale data (the block-wise write path below never reads existing
+        # content to decide what to write, so this check is the only thing
+        # standing between a fresh run and exactly that contamination).
+        if (file.exists(outfile) && !dir.exists(outfile)) file.remove(outfile)
+        if (dir.exists(blocks_dir)) unlink(blocks_dir, recursive = TRUE)
     }
 
     edge_list_all = if (resume) safe_read_chain(outfile, ncores = ncores_qs) else NULL
@@ -686,15 +762,17 @@ run_tree_mcmc_batch = function(
     for (i in chains) pending[[i]] = list()
     names(pending) = as.character(chains)
     rm(edge_list_all)
-    # Whether `outfile` legitimately holds this call's own prior trace. TRUE
-    # on a real resume (already verified against completed_iters above); on a
-    # fresh run it starts FALSE so the first checkpoint below overwrites
-    # rather than merges -- otherwise a stale file left at the same path by
-    # an unrelated earlier run would get silently prepended, doubling the
-    # trace. Flips to TRUE once this call has written its own first
-    # checkpoint, since later checkpoints in the same call may safely read
-    # back what they themselves just wrote.
-    disk_has_own_base = resume
+    # Block-wise checkpoint state. next_block_idx continues from whatever is
+    # already on disk (a real resume) or starts at 1 (the clean slate a
+    # fresh run just established above). seed_written tracks whether the
+    # seed tree (phy_init$edge) has already been persisted as the first
+    # element of some chain's trace -- true on any resume with existing
+    # content, false only when starting completely fresh, so the very first
+    # block written below includes it and every later block doesn't
+    # duplicate it.
+    existing_blocks = list_trace_blocks(outfile)
+    next_block_idx = length(existing_blocks) + 1L
+    seed_written = resume && (file.exists(outfile) || length(existing_blocks) > 0L)
 
     batch_idx = 0L
     repeat {
@@ -780,24 +858,28 @@ run_tree_mcmc_batch = function(
         fixed_complete <- is.null(conv_thres) && completed_iters >= max_iter
         persist_batch <- batch_idx %% checkpoint_every == 0L || converged || fixed_complete
         if (persist_batch) {
-            # Merge whatever is already on disk (from a previous checkpoint
-            # of *this* call, or a genuine resume) with the pending batches,
-            # so the on-disk file always holds the complete trace -- same
-            # contract as before, just assembled without keeping it all
-            # resident. On a fresh run's first checkpoint, disk_has_own_base
-            # is FALSE, so any stale file left at this path by an unrelated
-            # earlier run is overwritten rather than merged onto.
-            on_disk = if (disk_has_own_base) safe_read_chain(outfile, ncores = ncores_qs) else NULL
-            merged = vector('list', nchains)
+            # Write only what's new since the last checkpoint as its own
+            # block -- no read of prior data, so cost is proportional to
+            # this checkpoint's batch, not the whole trace so far. The first
+            # block of a fresh run also carries the seed tree, matching what
+            # a single element of a legacy trace's first position held.
+            block_payload = vector('list', nchains)
             for (chain_id in chains) {
-                base = if (is.null(on_disk)) NULL else on_disk[[chain_id]]
-                if (is.null(base) || length(base) == 0) base = list(phy_init$edge)
-                merged[[chain_id]] = c(base, pending[[chain_id]])
+                block_payload[[chain_id]] = if (!seed_written) {
+                    c(list(phy_init$edge), pending[[chain_id]])
+                } else {
+                    pending[[chain_id]]
+                }
             }
-            names(merged) = as.character(chains)
-            qs2::qd_save(merged, outfile, nthreads = ncores_qs)
-            rm(on_disk, merged)
-            disk_has_own_base = TRUE
+            names(block_payload) = as.character(chains)
+            dir.create(blocks_dir, recursive = TRUE, showWarnings = FALSE)
+            block_file = file.path(blocks_dir, sprintf('%08d.qs2', next_block_idx))
+            tmp_file = paste0(block_file, '.tmp')
+            qs2::qd_save(block_payload, tmp_file, nthreads = ncores_qs)
+            file.rename(tmp_file, block_file)
+            rm(block_payload)
+            next_block_idx = next_block_idx + 1L
+            seed_written = TRUE
             for (i in chains) pending[[i]] = list()
 
             if (use_mc3) {

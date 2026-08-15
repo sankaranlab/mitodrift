@@ -116,7 +116,7 @@ test_that("batched MC3 checkpoints and resumes heated states", {
         diagfile = diag_file, max_iter = 30L, nchains = 2L, ncores = 2L,
         batch_size = 10L, resume = TRUE, mc3_temperatures = c(1, 1.5, 2.25),
         mc3_swap_interval = 5L, mc3_statefile = state_file)
-    resumed_trace <- qs2::qd_read(trace_file)
+    resumed_trace <- mitodrift:::safe_read_chain(trace_file)
     resumed_checkpoint <- readRDS(state_file)
     expect_equal(lengths(resumed_trace), c(`1` = 31L, `2` = 31L))
     expect_equal(resumed_checkpoint$completed_iters, 30L)
@@ -158,7 +158,7 @@ test_that("deferred checkpoints retain the complete final trace and diagnostics"
         max_iter = 25L, nchains = 2L, ncores = 2L,
         batch_size = 10L, checkpoint_every = 2L)
 
-    persisted <- qs2::qd_read(trace_file)
+    persisted <- mitodrift:::safe_read_chain(trace_file)
     diagnostics <- readRDS(diag_file)
     expect_equal(lengths(result), c(`1` = 26L, `2` = 26L))
     expect_identical(persisted, result)

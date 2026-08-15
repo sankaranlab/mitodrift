@@ -22,7 +22,8 @@ run_tree_mcmc_batch(
   mc3_swap_interval = 10L,
   mc3_ncores = NULL,
   mc3_statefile = NULL,
-  checkpoint_every = 1L
+  checkpoint_every = 1L,
+  return_trace = TRUE
 )
 }
 \arguments{
@@ -32,8 +33,12 @@ run_tree_mcmc_batch(
 
 \item{logA_vec}{Numeric vector of log transition probabilities.}
 
-\item{outfile}{File path for saving/resuming the full edge-list trace
-(qs2 format).}
+\item{outfile}{File path identifying the trace (qs2 format). Checkpoints
+are written as small per-checkpoint block files under \verb{<outfile>.blocks/}
+rather than rewriting one cumulative file; a legacy single file directly
+at \code{outfile} (as archived regression keys use) is also still read
+transparently. Use \code{safe_read_chain()} rather than \code{qs2::qd_read()}
+directly to read a trace written by this function.}
 
 \item{diagfile}{Optional file path for saving convergence diagnostics
 (RDS format).}
@@ -71,13 +76,22 @@ ensemble-temperature pairs concurrently when those CPUs are allocated.}
 \item{mc3_statefile}{Optional RDS checkpoint for heated-chain states and
 swap statistics. Defaults to \code{paste0(outfile, ".mc3_state.rds")}.}
 
-\item{checkpoint_every}{Positive integer; persist the cumulative trace and
+\item{checkpoint_every}{Positive integer; persist a new checkpoint and the
 sampler state every this many diagnostic batches. The final batch is always
 persisted. Values greater than one reduce I/O at the cost of re-running up
-to \code{checkpoint_every - 1} batches after interruption.}
+to \code{checkpoint_every - 1} batches after interruption. Each checkpoint is
+written as its own small block file (see \code{outfile}), so this cost no
+longer grows with total run length.}
+
+\item{return_trace}{Logical; if \code{FALSE}, skip reconstructing the full
+trace for the return value and return \code{NULL} instead. The checkpointed
+file(s) on disk are unaffected either way. Set \code{FALSE} when the caller
+only needs the on-disk trace (e.g. to avoid paying for a read-back that
+would just be discarded).}
 }
 \value{
-A list of edge-list chains (one list of edge matrices per chain).
+A list of edge-list chains (one list of edge matrices per chain),
+or \code{NULL} when \code{return_trace = FALSE}.
 }
 \description{
 Runs MCMC sampling in fixed-size batches, computing ASDSF convergence

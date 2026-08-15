@@ -448,7 +448,10 @@ MitoDrift <- R6::R6Class("MitoDrift",
             
             ncores_qs <- if (isTRUE(qs2:::check_TBB())) ncores_qs else 1L
             message('Loading MCMC results from ', mcmc_trace_file, ' using ', ncores_qs, ' cores')
-            res_mcmc <- qs2::qd_read(mcmc_trace_file, nthreads = ncores_qs)
+            res_mcmc <- safe_read_chain(mcmc_trace_file, ncores = ncores_qs)
+            if (is.null(res_mcmc)) {
+                stop('No MCMC trace found at ', mcmc_trace_file, ' (or its .blocks/ directory)')
+            }
             
             message('Collecting MCMC chains with burnin ', burnin, ' and max_iter ', max_iter, ' using ', ncores, ' cores...')
             edges_mcmc <- collect_edges(res_mcmc, burnin = burnin, max_iter = max_iter)
