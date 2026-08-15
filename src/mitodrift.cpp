@@ -476,6 +476,7 @@ struct NNICache {
 	// transition precompute
 	std::vector<double> row_maxA;				// size C
     arma::Mat<double> expA_shifted_t;    // stores exp(A) rows as columns (C x C)
+    arma::Mat<double> expA_plain;         // raw exp(A), (parent row, child col) — for outside/down messages
 
 	// data likelihoods
 	std::vector< std::vector<double> > logP_list;	// L × (C*n), row-major per locus
@@ -483,6 +484,74 @@ struct NNICache {
 	// per-locus cached child→parent contributions F (n*C) and root logZ
     // F layout: [node][c][l] -> node * (C*L) + c*L + l
 	std::vector<double> F;		// n * C * L
+	// per-locus cached "outside" messages G (everything except node's own
+	// subtree, expressed in node's own state space). Same layout as F.
+	// G[root] is identically 0 (log 1) — the root has no outside context.
+	std::vector<double> G;		// n * C * L
+
+	// Lazy validity tracking for G, two layers:
+	//
+	// (1) g_content_version[v]: bumped every time G[v]'s cached array is
+	//     actually rewritten (at repair time, via ensure_g_valid). A node's
+	//     cached value is stale relative to its parent whenever
+	//     g_parent_content_snapshot[v] != g_content_version[parent_of[v]] --
+	//     this catches staleness that cascades through untouched
+	//     intermediate nodes (v's own g_dirty flag stays false when only an
+	//     ancestor changed; the comparison against the parent's CURRENT,
+	//     post-repair content version is what makes that visible). This
+	//     comparison is only trustworthy once the parent itself has been
+	//     recursively confirmed/repaired first -- ensure_g_valid always
+	//     does that before checking or repairing v itself.
+	// (2) g_verified_epoch[v]: an O(1) fast-path cache on top of (1). Once
+	//     ensure_g_valid(v) completes within a given g_epoch (unchanged
+	//     since the last mark_g_dirty call anywhere in the cache), nothing
+	//     about the tree's true G values can have changed since -- only a
+	//     commit (mark_g_dirty, which bumps g_epoch) invalidates that. So a
+	//     later query for the same v, or for a different node whose walk
+	//     reaches v, can skip straight past v once g_verified_epoch[v]
+	//     matches the current g_epoch, without re-checking (1) at all.
+	//
+	// g_dirty[v] remains the explicit "v itself was directly invalidated"
+	// flag set by mark_g_dirty (for the O(depth)+4 nodes an accept
+	// actually touches), independent of what descendants later discover
+	// via (1). See NNI_CACHE_BIDIRECTIONAL_NOTES.md.
+	std::vector<long long> g_content_version;          // n; bumped when G[v] is actually rewritten
+	std::vector<long long> g_parent_content_snapshot;  // n; g_content_version[parent_of[v]] as of that rewrite
+	std::vector<long long> g_verified_epoch;           // n; g_epoch as of last full confirmation
+	std::vector<char> g_dirty;                         // n; explicitly known-stale regardless of version
+	long long g_content_clock = 0;  // monotonic, bumped once per actual G[v] rewrite
+	long long g_epoch = 0;          // monotonic, bumped once per mark_g_dirty call
+
+	// Mirror-image lazy tracking for F (the "inside" cache), same scheme as
+	// G but recursing through CHILDREN instead of the parent, since F[v]
+	// depends on F[children_of[v]] rather than on a parent/sibling pair.
+	// Unlike G, F's staleness cascades correctly through a plain
+	// content-version check with NO extra explicit marking beyond the two
+	// directly-touched nodes (p1, p2): an ancestor's check compares against
+	// its CHILDREN's current content versions, and p1/p2 are always exactly
+	// those children for whichever ancestor sits just above them, so the
+	// mismatch is visible the moment it matters. G needed explicit
+	// ancestor-sibling marking specifically because its dependency (parent
+	// + SIBLING's F) doesn't line up with the parent-of recursion the same
+	// way. See ensure_f_valid.
+	std::vector<long long> f_content_version;           // n; bumped when F[v] is actually rewritten
+	std::vector<long long> f_child_content_snapshot0;   // n; f_content_version[children_of[v][0]] as of that rewrite
+	std::vector<long long> f_child_content_snapshot1;   // n; f_content_version[children_of[v][1]] as of that rewrite
+	std::vector<long long> f_verified_epoch;            // n; f_epoch as of last full confirmation
+	std::vector<char> f_dirty;                          // n; explicitly known-stale regardless of version
+	long long f_content_clock = 0;
+	long long f_epoch = 0;
+
+	// Fast-path commit staging, separate from the original staged_* fields
+	// (which belong to compute_new_loglik/commit_staged_nni and stay
+	// untouched so that path keeps working independently). Populated by
+	// compute_new_loglik_fast, applied by commit_fast.
+	mutable int fast_staged_p1 = -1, fast_staged_p2 = -1;
+	mutable int fast_staged_c1 = -1, fast_staged_cX = -1, fast_staged_cStay = -1;
+	mutable std::vector<double> fast_staged_F_p2;  // CL
+	mutable std::vector<double> fast_staged_F_p1;  // CL
+	mutable bool fast_staged_ready = false;
+
 	std::vector<double> logZ;	// L
     std::vector<double> logP_storage; // n * C * L
     double current_total_loglik_val;
@@ -573,7 +642,7 @@ struct NNICache {
         scratch_prev_childF.resize(CL);
         scratch_F_v.resize(CL);
         scratch_s_full.resize(CL);
-		
+
         scratch_max_t.resize(L);
         reset_staged_state_unlocked();
 
@@ -613,6 +682,18 @@ struct NNICache {
             }
         }
 
+        // Raw (unshifted) transition probabilities for outside/down messages:
+        // expA_plain(u, k) = A[u][k] = P(child state k | parent state u).
+        // No row-max shift needed here: entries are true probabilities in
+        // [0, 1], so exponentiating logA directly cannot overflow.
+        expA_plain.set_size(C, C);
+        for (int u = 0; u < C; ++u) {
+            const double* Arow = logA_in.data() + static_cast<size_t>(u) * C;
+            for (int k = 0; k < C; ++k) {
+                expA_plain(u, k) = std::exp(Arow[k]);
+            }
+        }
+
 		// Transpose logP
         logP_storage.resize(n * C * L);
         for (int l = 0; l < L; ++l) {
@@ -628,6 +709,7 @@ struct NNICache {
 
 		// allocate caches
 		F.assign(n * C * L, 0.0);
+		G.assign(n * C * L, 0.0); // G[root] stays 0 (log 1): no outside context
 		logZ.assign(L, 0.0);
 
         std::vector<double> msg_nm(n * C * L, 0.0); // Accumulator for children messages
@@ -727,6 +809,36 @@ struct NNICache {
             }
             current_total_loglik_val += logZ[l];
         }
+
+        // Build the outside cache G for the whole tree. F[] above is already
+        // complete, so this full top-down pass from the root only needs to
+        // happen once, here, at construction time. Accepted NNIs later only
+        // mark the affected region dirty (see mark_g_dirty); repair happens
+        // lazily in ensure_g_valid, on demand.
+        recompute_G_subtree(root, shared_scratch());
+
+        // Every node starts valid: content version and its parent snapshot
+        // both begin at 0 uniformly (root's own version is never read), and
+        // g_verified_epoch starts equal to g_epoch (both 0) so nothing
+        // needs a walk before the first mark_g_dirty call.
+        g_content_version.assign(n, 0);
+        g_parent_content_snapshot.assign(n, 0);
+        g_verified_epoch.assign(n, 0);
+        g_dirty.assign(n, 0);
+        g_content_clock = 0;
+        g_epoch = 0;
+
+        // F was built eagerly above (the per-edge loop that fills F.assign(...)),
+        // so it starts fully valid too -- same all-zero consistent state.
+        f_content_version.assign(n, 0);
+        f_child_content_snapshot0.assign(n, 0);
+        f_child_content_snapshot1.assign(n, 0);
+        f_verified_epoch.assign(n, 0);
+        f_dirty.assign(n, 0);
+        f_content_clock = 0;
+        f_epoch = 0;
+        fast_staged_F_p2.assign(CL, 0.0);
+        fast_staged_F_p1.assign(CL, 0.0);
 	}
 
 	inline int other_child(int parent, int child) const {
@@ -835,6 +947,356 @@ struct NNICache {
         }
         if (std::isnan(total_logZ)) return -std::numeric_limits<double>::infinity();
         return total_logZ;
+    }
+
+    // Outside ("everything except this node's own subtree") message, mirroring
+    // em_helpers.cpp's compute_down_msg_fast / the down_in recursion used by
+    // compute_node_edge_stats_bp2 for the EM E-step, vectorized across loci.
+    // G_parent, F_sibling, P_parent are all read in the PARENT's state space
+    // (size CL); the result outG is in the CHILD's state space (size CL).
+    // Unlike compute_F_vectorized (which sums over the child index using
+    // expA_shifted_t, parent-indexed rows), this sums over the PARENT index
+    // using expA_plain (parent row u, child col k) -- the same transition
+    // matrix A, just contracted along the other axis, so no reversed/backward
+    // transition matrix is needed.
+    inline void compute_G_vectorized(
+        const double* G_parent,
+        const double* F_sibling,
+        const double* P_parent,
+        double* outG,
+        const ScratchBuffers& scratch
+    ) const {
+        double* temp = scratch.temp;
+        double* u = scratch.u;
+        double* s_full = scratch.s_full;
+        double* max_t = scratch.max_t;
+        const double neg_inf = -std::numeric_limits<double>::infinity();
+        std::fill(max_t, max_t + L, neg_inf);
+
+        for (int uu = 0; uu < C; ++uu) {
+            const double* p_ptr = P_parent + uu * L;
+            const double* g_ptr = G_parent + uu * L;
+            const double* f_ptr = F_sibling + uu * L;
+            double* t_ptr = temp + uu * L;
+            for (int l = 0; l < L; ++l) {
+                double val = p_ptr[l] + g_ptr[l] + f_ptr[l];
+                t_ptr[l] = val;
+                if (val > max_t[l]) max_t[l] = val;
+            }
+        }
+
+        for (int uu = 0; uu < C; ++uu) {
+            double* t_ptr = temp + uu * L;
+            double* u_ptr = u + uu * L;
+            for (int l = 0; l < L; ++l) {
+                u_ptr[l] = (max_t[l] == neg_inf) ? 0.0 : std::exp(t_ptr[l] - max_t[l]);
+            }
+        }
+
+        // T(l,k) = sum_u U(l,u) * expA_plain(u,k) = sum_u u_u(l) * A[u][k]
+        arma::Mat<double> U_view(u, L, C, false, true);
+        arma::Mat<double> T_view(s_full, L, C, false, true);
+        T_view = U_view * expA_plain;
+        const double* t_ptr2 = T_view.memptr();
+
+        for (int k = 0; k < C; ++k) {
+            const double* t_col = t_ptr2 + static_cast<size_t>(k) * L;
+            double* out_ptr = outG + k * L;
+            for (int l = 0; l < L; ++l) {
+                if (max_t[l] == neg_inf || t_col[l] <= 0.0) {
+                    out_ptr[l] = neg_inf;
+                } else {
+                    out_ptr[l] = max_t[l] + std::log(t_col[l]);
+                }
+            }
+        }
+    }
+
+    // Recompute G[] for every node within start_node's subtree (its children
+    // and all descendants), assuming G[start_node] itself is already correct.
+    // Used both for the one-time full-tree build at construction (start_node
+    // = root, G[root] = 0) and for the accept-time scoped update (start_node
+    // = p1: an NNI entirely contained within p1's subtree leaves p1's own
+    // outside context, and everything outside p1's subtree, unchanged).
+    void recompute_G_subtree(int start_node, const ScratchBuffers& scratch) {
+        std::vector<int> stack;
+        stack.reserve(static_cast<std::size_t>(n));
+        stack.push_back(start_node);
+        while (!stack.empty()) {
+            const int u_node = stack.back();
+            stack.pop_back();
+            const double* G_u = G.data() + static_cast<std::size_t>(u_node) * C * L;
+            const double* P_u = logP_storage.data() + static_cast<std::size_t>(u_node) * C * L;
+            const auto& ch = children_of[u_node];
+            for (int t = 0; t < 2; ++t) {
+                const int v = ch[t];
+                if (v < 0) continue;
+                const int sib = ch[1 - t];
+                const double* F_sib = F.data() + static_cast<std::size_t>(sib) * C * L;
+                double* G_v = G.data() + static_cast<std::size_t>(v) * C * L;
+                compute_G_vectorized(G_u, F_sib, P_u, G_v, scratch);
+                stack.push_back(v);
+            }
+        }
+    }
+
+    // Declare G[v] stale. O(1): does not touch v's descendants -- their
+    // staleness is discovered lazily, later, by ensure_g_valid's content-
+    // version comparison, not by anything done here. Bumping the shared
+    // epoch is what makes every node's g_verified_epoch fast-path cache
+    // stale as of this call, so the next query anywhere is forced through
+    // the real (cheap, non-expensive) check again.
+    inline void mark_g_dirty(int v) {
+        g_dirty[v] = 1;
+        ++g_epoch;
+    }
+
+    // Lazily repair G[v] if stale. Two layers, in order:
+    //  1. g_verified_epoch fast path: if v was already fully confirmed
+    //     since the last mark_g_dirty call anywhere, nothing about the
+    //     true G values could have changed since -- O(1), no recursion.
+    //  2. Otherwise, recursively ensure the parent first (so its content
+    //     version is trustworthy), then decide whether v itself needs an
+    //     actual recompute: either it was explicitly marked, or its cached
+    //     value was built from a parent content version that the parent no
+    //     longer has (catches staleness cascading through an intermediate
+    //     node that was never itself marked -- see the class-level comment
+    //     above the g_content_version declaration for why this can't be a
+    //     single-level stamp comparison).
+    // Worst case O(depth) (same as the walk this exists to avoid paying on
+    // every evaluation), but only actually recomputes G for nodes between
+    // the nearest true change and v -- everything else on the path is a
+    // cheap version-mismatch check, not a compute_G_vectorized call.
+    // Declare F[v] stale (its children changed). O(1). Unlike G's version,
+    // this needs no separate ancestor-marking step -- see the class-level
+    // comment above the f_content_version declaration for why the plain
+    // content-version cascade already covers ancestors correctly.
+    inline void mark_f_dirty(int v) {
+        f_dirty[v] = 1;
+        ++f_epoch;
+    }
+
+    // Lazily repair F[v] if stale, same two-layer scheme as ensure_g_valid
+    // but recursing through children_of instead of parent_of, since F[v]
+    // depends on F[both children] rather than on a parent/sibling pair. A
+    // tip (no children) never needs repair: its F is fixed at construction
+    // and never touched by any NNI (only internal topology changes).
+    void ensure_f_valid(int v) {
+        if (children_of[v][0] < 0) return; // tip
+        if (f_verified_epoch[v] == f_epoch) return; // O(1) fast path
+        const int c0 = children_of[v][0];
+        const int c1 = children_of[v][1];
+        ensure_f_valid(c0);
+        ensure_f_valid(c1);
+        if (f_dirty[v] ||
+            f_child_content_snapshot0[v] != f_content_version[c0] ||
+            f_child_content_snapshot1[v] != f_content_version[c1]) {
+            compute_F_vectorized(
+                F.data() + static_cast<std::size_t>(c0) * C * L,
+                F.data() + static_cast<std::size_t>(c1) * C * L,
+                logP_storage.data() + static_cast<std::size_t>(v) * C * L,
+                F.data() + static_cast<std::size_t>(v) * C * L,
+                shared_scratch()
+            );
+            f_content_version[v] = ++f_content_clock;
+            f_child_content_snapshot0[v] = f_content_version[c0];
+            f_child_content_snapshot1[v] = f_content_version[c1];
+            f_dirty[v] = 0;
+        }
+        f_verified_epoch[v] = f_epoch;
+    }
+
+    void ensure_g_valid(int v) {
+        if (v == root) return;
+        if (g_verified_epoch[v] == g_epoch) return; // O(1) fast path
+        const int par = parent_of[v];
+        ensure_g_valid(par);
+        if (g_dirty[v] || g_parent_content_snapshot[v] != g_content_version[par]) {
+            const int sib = other_child(par, v);
+            ensure_f_valid(sib);
+            compute_G_vectorized(
+                G.data() + static_cast<std::size_t>(par) * C * L,
+                F.data() + static_cast<std::size_t>(sib) * C * L,
+                logP_storage.data() + static_cast<std::size_t>(par) * C * L,
+                G.data() + static_cast<std::size_t>(v) * C * L,
+                shared_scratch()
+            );
+            g_content_version[v] = ++g_content_clock;
+            g_parent_content_snapshot[v] = g_content_version[par];
+            g_dirty[v] = 0;
+        }
+        g_verified_epoch[v] = g_epoch;
+    }
+
+    // O(1) amortized, depth-independent evaluation of the total loglik if
+    // we perform NNI "which" at the nth internal edge, using the cached
+    // outside message G[p1] instead of walking to the root. Repairs G[p1]
+    // (and, transitively, F for c1/cX/cStay -- any of which could be stale
+    // if F is lazy and one of them served as an ancestor in some earlier
+    // accepted move) lazily first. Also stages F_p2_new and F_p1_new (one
+    // extra cheap combine beyond what evaluation alone needs) so that, if
+    // this proposal is accepted, commit_fast() can apply them directly
+    // instead of redoing an O(depth) walk to get the same values -- see
+    // NNI_CACHE_BIDIRECTIONAL_NOTES.md for why the first cut of this (which
+    // discarded the fast evaluation and re-ran the full O(depth) staged
+    // walk on every accept) was a net loss on high-acceptance-rate chains:
+    // this cache's own scratch_mutex-guarded staged_* fields
+    // (compute_new_loglik / commit_staged_nni) are untouched by this path;
+    // fast_staged_* is separate so the two commit routes never collide.
+    double compute_new_loglik_fast(int edge_n, int which) {
+        const ScratchBuffers scratch = acquire_scratch(false);
+        const int ind = locate_internal_edge_index(edge_n);
+        if (ind < 0) stop("edge_n out of range in compute_new_loglik_fast");
+
+        const int p1 = E[ind];
+        const int p2 = E[m + ind];
+        const int c1 = other_child(p1, p2);
+        const int c2 = children_of[p2][0];
+        const int c3 = children_of[p2][1];
+
+        const int cX    = (which == 0 ? c2 : c3);
+        const int cStay = (which == 0 ? c3 : c2);
+
+        ensure_f_valid(c1);
+        ensure_f_valid(cStay);
+        ensure_f_valid(cX);
+        ensure_g_valid(p1);
+
+        // New F[p2]: combine c1 (moving in under p2) and cStay (unchanged).
+        // Written directly into the fast-staging buffer (not scratch) so
+        // commit_fast can apply it without recomputing.
+        double* F_p2_new = fast_staged_F_p2.data();
+        compute_F_vectorized(
+            F.data() + c1 * C * L,
+            F.data() + cStay * C * L,
+            logP_storage.data() + p2 * C * L,
+            F_p2_new,
+            scratch
+        );
+
+        // New F[p1]: combine the just-computed F_p2_new with cX (moving in
+        // under p1) and p1's own leaf likelihood -- this is the extra
+        // combine compute_new_loglik_fast didn't need before staging existed.
+        double* F_p1_new = fast_staged_F_p1.data();
+        const double* P_p1 = logP_storage.data() + p1 * C * L;
+        compute_F_vectorized(
+            F_p2_new,
+            F.data() + cX * C * L,
+            P_p1,
+            F_p1_new,
+            scratch
+        );
+
+        fast_staged_p1 = p1; fast_staged_p2 = p2;
+        fast_staged_c1 = c1; fast_staged_cX = cX; fast_staged_cStay = cStay;
+        fast_staged_ready = true;
+
+        // p1's own leaf likelihood combined with its (unchanged) outside
+        // message -- reuse the childF scratch slot as the combine buffer
+        // (F_p2/F_p1 scratch slots are free here since we wrote directly
+        // into the fast_staged_* buffers above instead).
+        double* Pg = scratch.childF;
+        const double* G_p1 = G.data() + p1 * C * L;
+        const std::size_t block = static_cast<std::size_t>(C) * L;
+        for (std::size_t idx = 0; idx < block; ++idx) Pg[idx] = P_p1[idx] + G_p1[idx];
+
+        // Same identity compute_root_logZ_vectorized already implements for
+        // the root special case: logsumexp_c(P_base[c] + F_a[c] + F_b[c]),
+        // summed over loci. Pg stands in for the root's P, F[cX] is the
+        // other branch into p1 that this NNI leaves untouched.
+        return compute_root_logZ_vectorized(F_p2_new, F.data() + cX * C * L, Pg, scratch);
+    }
+
+    // Apply a proposal previously evaluated (and staged) by
+    // compute_new_loglik_fast. Writes F[p1]/F[p2] directly from the
+    // already-computed fast_staged buffers (no recompute), updates
+    // topology exactly as commit_staged_nni does, and marks the same
+    // O(depth)+4 nodes' G dirty -- but derives the ancestor-sibling chain
+    // by walking parent_of directly (fast_staged_* carries no path beyond
+    // p1/p2, unlike the old staged_nodes) rather than needing F for
+    // ancestor2+ to be freshly known at all: F for those nodes is left
+    // exactly as it was, to be repaired lazily by ensure_f_valid only if
+    // and when something later actually needs it.
+    // new_total_loglik is the value compute_new_loglik_fast already
+    // returned for this exact staged proposal -- passed in rather than
+    // recomputed, since the caller already has it.
+    void commit_fast(double new_total_loglik) {
+        if (!fast_staged_ready) stop("No staged fast NNI proposal to apply");
+        const int p1 = fast_staged_p1;
+        const int p2 = fast_staged_p2;
+        const int c1 = fast_staged_c1;
+        const int cX = fast_staged_cX;
+        const int cStay = fast_staged_cStay;
+        const std::size_t block = CL;
+
+        // Write the new F values now (doesn't depend on children_of), but
+        // defer their content-version/snapshot bookkeeping until after the
+        // topology update below -- the snapshot must record each node's
+        // NEW children (c1/cX swapped in), not whatever children_of still
+        // holds before that update runs.
+        std::copy(fast_staged_F_p2.begin(), fast_staged_F_p2.end(), F.data() + static_cast<std::size_t>(p2) * block);
+        std::copy(fast_staged_F_p1.begin(), fast_staged_F_p1.end(), F.data() + static_cast<std::size_t>(p1) * block);
+
+        auto &ch1 = children_of[p1];
+        if (ch1[0] == c1) ch1[0] = cX; else ch1[1] = cX;
+        auto &ch2 = children_of[p2];
+        if (ch2[0] == cX) ch2[0] = c1; else ch2[1] = c1;
+        parent_of[c1] = p2;
+        parent_of[cX] = p1;
+
+        for (int i = 0; i < m; ++i) {
+            if (E[i] == p1 && E[m + i] == c1) { E[m + i] = cX; break; }
+        }
+        for (int i = 0; i < m; ++i) {
+            if (E[i] == p2 && E[m + i] == cX) { E[m + i] = c1; break; }
+        }
+
+        arma::Col<int> E1 = E + 1;
+        E1 = reorderRcpp(E1);
+        E = E1 - 1;
+        root = E(m - 1);
+        rebuild_internal_edge_indices();
+
+        // F actually changed (p1/p2), so every previously-verified node's
+        // f_verified_epoch fast path must be invalidated -- otherwise an
+        // ancestor checked-and-found-clean before this commit would keep
+        // short-circuiting past the content-version check below forever,
+        // never noticing its child's version just changed. Mirrors why
+        // mark_g_dirty always bumps g_epoch, just without a per-node dirty
+        // flag here since p1/p2 are the only nodes needing one (see the
+        // class-level comment above f_content_version).
+        ++f_epoch;
+
+        f_content_version[p2] = ++f_content_clock;
+        f_child_content_snapshot0[p2] = f_content_version[children_of[p2][0]];
+        f_child_content_snapshot1[p2] = f_content_version[children_of[p2][1]];
+        f_dirty[p2] = 0;
+        f_verified_epoch[p2] = f_epoch;
+
+        f_content_version[p1] = ++f_content_clock;
+        f_child_content_snapshot0[p1] = f_content_version[children_of[p1][0]];
+        f_child_content_snapshot1[p1] = f_content_version[children_of[p1][1]];
+        f_dirty[p1] = 0;
+        f_verified_epoch[p1] = f_epoch;
+
+        current_total_loglik_val = new_total_loglik;
+
+        mark_g_dirty(cX);
+        mark_g_dirty(p2);
+        mark_g_dirty(c1);
+        mark_g_dirty(cStay);
+        {
+            int v = p1;
+            while (true) {
+                const int par = parent_of[v];
+                if (par == -1) break; // v is root: no sibling
+                const int sib = other_child(par, v);
+                mark_g_dirty(sib);
+                v = par;
+            }
+        }
+
+        fast_staged_ready = false;
     }
 
     double compute_new_loglik_impl(int edge_n, int which, bool stage_results, const ScratchBuffers& scratch) const {
@@ -952,7 +1414,25 @@ struct NNICache {
         return compute_new_loglik_impl(edge_n, which, false, acquire_scratch(false));
     }
 
-    void commit_staged_nni() {
+    // sync_outside_cache: whether to also rebuild the outside-message cache
+    // G[] for whatever it touched (p1's own subtree, plus every ancestor's
+    // stale sibling subtree up to the root -- see below). Defaults to false:
+    // ordinary MCMC/MC3 evaluate via the O(depth) root walk (compute_new_loglik)
+    // and never read G[], so paying to keep it in sync on every commit would
+    // be pure overhead for them. G[] is correct as of construction regardless
+    // (see the NNICache constructor); this flag only matters for a caller that
+    // wants compute_new_loglik_fast's O(1) evaluation to stay valid across
+    // repeated accepted moves. NOTE: the accept-time cost of keeping G[] in
+    // sync is proportional to the SIZE of the sibling subtrees hanging off
+    // the path from p1 to the root, not to the path's LENGTH -- on a
+    // balanced-ish tree those sibling subtrees are large (observed: two
+    // subtrees of 81 and 317 nodes off a 200-tip tree's own root), so this
+    // can cost far more than the O(depth) walk it would otherwise replace.
+    // It is a clear net win only when the tree is a deep, ladder-like shape
+    // (sibling subtrees near a tip-proposal's path stay small) -- see
+    // NNI_CACHE_BIDIRECTIONAL_NOTES.md for the full analysis, including why
+    // this is currently NOT wired into any of the production MCMC/MC3 loops.
+    void commit_staged_nni(bool sync_outside_cache = false) {
         std::lock_guard<std::mutex> guard(scratch_mutex);
         if (!staged_ready) stop("No staged NNI proposal to apply");
         const std::size_t block = CL;
@@ -992,6 +1472,46 @@ struct NNICache {
         root = E(m - 1);
         rebuild_internal_edge_indices();
 
+        if (sync_outside_cache) {
+            // Mark exactly what's now stale -- O(depth)+4 work (same order
+            // as the F-update above, not the O(subtree) eager rebuild this
+            // replaced), no descendant touched. ensure_g_valid() repairs
+            // lazily, only for whatever a future query actually needs.
+            //
+            // Two independent sources of staleness:
+            //
+            // (1) Inside p1's own subtree: G[p1] itself is unaffected (the
+            //     NNI is entirely contained within it), but the four nodes
+            //     whose sibling identity or parent changed are not --
+            //     cX (new parent p1), p2 (same parent p1, new sibling cX),
+            //     c1 (new parent p2), cStay (same parent p2, new sibling
+            //     c1). Their descendants cascade-invalidate automatically
+            //     via the content-version comparison in ensure_g_valid,
+            //     without needing to be visited here.
+            mark_g_dirty(cX);
+            mark_g_dirty(p2);
+            mark_g_dirty(c1);
+            mark_g_dirty(cStay);
+
+            // (2) Outside p1's subtree: F changed for every ancestor on the
+            //     path from p1 up to (not including) the root -- staged_nodes
+            //     holds exactly that path, plus p2 at index 0 (already
+            //     covered by (1)). Each such ancestor v's SIBLING used the
+            //     OLD F[v] as an input to its own outside message, so it is
+            //     now stale even though it sits entirely outside p1's
+            //     subtree. G[v] itself, and every node on the direct path
+            //     to the root, stays valid: their formulas only ever depend
+            //     on F of nodes OFF the path (aunts), never on F of a path
+            //     node's own ancestor.
+            for (std::size_t idx = 1; idx < staged_nodes.size(); ++idx) {
+                const int v = staged_nodes[idx];
+                const int par = parent_of[v];
+                if (par == -1) continue; // v is root (p1 was root): no sibling
+                const int sib = other_child(par, v);
+                mark_g_dirty(sib);
+            }
+        }
+
         reset_staged_state_unlocked();
     }
 
@@ -1009,7 +1529,85 @@ struct NNICache {
 	double total_loglik() const {
 		return current_total_loglik_val;
 	}
+
+    // Debug-only: recompute F for every node bottom-up from scratch
+    // (ignoring all lazy bookkeeping), ensure_f_valid every node via the
+    // lazy path first, and report the first node where the two disagree.
+    // Returns -1 if fully consistent.
+    int debug_verify_f_consistency(double tol = 1e-6) {
+        // First, force the lazy path to repair everything (same as any
+        // real caller reaching every node would).
+        for (int v = 0; v < n; ++v) ensure_f_valid(v);
+
+        std::vector<double> ground_truth(static_cast<std::size_t>(n) * C * L, 0.0);
+        // Postorder: process children before parents. Reuse a simple stack-based
+        // postorder over the current topology.
+        std::vector<int> order;
+        order.reserve(n);
+        {
+            std::vector<int> stack;
+            std::vector<char> visited(n, 0);
+            stack.push_back(root);
+            std::vector<int> tmp_order;
+            while (!stack.empty()) {
+                int v = stack.back(); stack.pop_back();
+                tmp_order.push_back(v);
+                if (children_of[v][0] >= 0) stack.push_back(children_of[v][0]);
+                if (children_of[v][1] >= 0) stack.push_back(children_of[v][1]);
+            }
+            for (int i = static_cast<int>(tmp_order.size()) - 1; i >= 0; --i) order.push_back(tmp_order[i]);
+        }
+        ScratchBuffers scratch = shared_scratch();
+        for (int v : order) {
+            if (children_of[v][0] < 0) {
+                std::copy(F.data() + static_cast<std::size_t>(v) * C * L,
+                          F.data() + static_cast<std::size_t>(v) * C * L + C * L,
+                          ground_truth.data() + static_cast<std::size_t>(v) * C * L);
+                continue;
+            }
+            const int c0 = children_of[v][0];
+            const int c1v = children_of[v][1];
+            compute_F_vectorized(
+                ground_truth.data() + static_cast<std::size_t>(c0) * C * L,
+                ground_truth.data() + static_cast<std::size_t>(c1v) * C * L,
+                logP_storage.data() + static_cast<std::size_t>(v) * C * L,
+                ground_truth.data() + static_cast<std::size_t>(v) * C * L,
+                scratch
+            );
+        }
+        for (int v = 0; v < n; ++v) {
+            if (v == root) continue; // F[root] is intentionally never set/used
+            const double* a = F.data() + static_cast<std::size_t>(v) * C * L;
+            const double* b = ground_truth.data() + static_cast<std::size_t>(v) * C * L;
+            for (int idx = 0; idx < C * L; ++idx) {
+                const double av = a[idx], bv = b[idx];
+                const bool both_inf = !std::isfinite(av) && !std::isfinite(bv);
+                if (!both_inf && std::abs(av - bv) > tol) return v;
+            }
+        }
+        return -1;
+    }
 };
+
+// Debug-only: replay a fixed sequence of (edge_n, which, accept) via the
+// fast path, then run debug_verify_f_consistency(). Returns the first
+// inconsistent node id, or -1. Lets a bug be isolated to "already wrong
+// after commit N" vs. "only wrong once evaluation N+1 touches it".
+// [[Rcpp::export]]
+int nni_cache_replay_and_verify_f_cpp(
+    arma::Col<int> E,
+    const std::vector<std::vector<double>>& logP,
+    const std::vector<double>& logA,
+    const std::vector<int>& edge_ns,
+    const std::vector<int>& whichs,
+    const std::vector<int>& accepts) {
+    NNICache cache(E, logP, logA);
+    for (std::size_t i = 0; i < edge_ns.size(); ++i) {
+        double ll = cache.compute_new_loglik_fast(edge_ns[i], whichs[i]);
+        if (accepts[i]) cache.commit_fast(ll);
+    }
+    return cache.debug_verify_f_consistency();
+}
 
 // ---- Rcpp exported wrappers around NNICache ----
 
@@ -1044,6 +1642,43 @@ void nni_cache_apply(SEXP xp, int edge_n, int which) {
 arma::Col<int> nni_cache_current_E(SEXP xp) {
 	Rcpp::XPtr<NNICache> ptr(xp);
 	return ptr->E + 1; // back to 1-indexed
+}
+
+// Test-only hook: compares the O(depth) root-walk evaluation
+// (compute_new_loglik) against the O(1) outside-cache evaluation
+// (compute_new_loglik_fast) across a caller-supplied sequence of proposals,
+// optionally applying (accepting) each one in turn so the comparison also
+// exercises the cache after repeated accepted NNIs (and therefore repeated
+// scoped G[] rebuilds). Returns both values so R-side tests can assert exact
+// agreement.
+// [[Rcpp::export]]
+Rcpp::DataFrame nni_cache_compare_eval_cpp(
+    arma::Col<int> E,
+    const std::vector<std::vector<double>>& logP,
+    const std::vector<double>& logA,
+    const std::vector<int>& edge_ns,
+    const std::vector<int>& whichs,
+    bool apply_each) {
+    if (edge_ns.size() != whichs.size()) {
+        Rcpp::stop("edge_ns and whichs must have the same length");
+    }
+    NNICache cache(E, logP, logA);
+    const std::size_t n_props = edge_ns.size();
+    Rcpp::NumericVector old_ll(n_props);
+    Rcpp::NumericVector fast_ll(n_props);
+    for (std::size_t i = 0; i < n_props; ++i) {
+        old_ll[i] = cache.compute_new_loglik(edge_ns[i], whichs[i]);
+        fast_ll[i] = cache.compute_new_loglik_fast(edge_ns[i], whichs[i]);
+        if (apply_each) {
+            cache.compute_new_loglik(edge_ns[i], whichs[i], true);
+            cache.commit_staged_nni(/*sync_outside_cache=*/true);
+        }
+    }
+    return Rcpp::DataFrame::create(
+        Rcpp::Named("edge_n") = edge_ns,
+        Rcpp::Named("which") = whichs,
+        Rcpp::Named("old_loglik") = old_ll,
+        Rcpp::Named("fast_loglik") = fast_ll);
 }
 
 // --------------------------------------------------------------------------
@@ -1298,6 +1933,69 @@ std::vector<arma::Col<int>> tree_mcmc_cpp_cached_threadsafe(
 	return tree_list;
 }
 
+// Benchmark-only twin of tree_mcmc_cpp_cached_threadsafe using the lazy
+// G-cache evaluation path instead of the O(depth) root walk. A rejected
+// proposal only needs compute_new_loglik_fast (O(1) amortized, no F
+// update) -- the walk baseline always pays is skipped entirely. An
+// accepted proposal still needs the real O(depth) walk regardless of how
+// it was evaluated, since F must be correctly updated either way; this
+// re-stages via compute_new_loglik and commits with sync_outside_cache =
+// true (O(depth)+4 cheap dirty marks, not the eager O(subtree) rebuild
+// NNI_CACHE_BIDIRECTIONAL_NOTES.md found to be a net loss). Not used by
+// any production driver -- exists to measure whether this design is
+// actually faster than the baseline before deciding whether to wire it in.
+// [[Rcpp::export]]
+std::vector<arma::Col<int>> tree_mcmc_cpp_cached_threadsafe_fast(
+	arma::Col<int> E,
+	const std::vector< std::vector<double> >& logP,
+	const std::vector<double>& logA,
+    int max_iter = 100, int seed = -1, bool reorder = true) {
+
+	const int n = static_cast<int>(E.n_elem / 4) - 1;
+	NNICache cache(E, logP, logA, reorder);
+
+    std::vector<arma::Col<int>> tree_list(static_cast<size_t>(max_iter) + 1);
+    double l_0 = cache.total_loglik();
+    tree_list[0] = cache.E + 1;
+
+	std::mt19937 gen;
+	if (seed == -1) {
+		std::random_device rd;
+		gen.seed(rd());
+	} else {
+		gen.seed(seed);
+	}
+	std::uniform_int_distribution<> dis1(1, n);
+	std::uniform_int_distribution<> dis2(0, 1);
+	std::uniform_real_distribution<> dis3(0.0, 1.0);
+
+    for (int i = 0; i < max_iter; ++i) {
+		const int r1 = dis1(gen);
+		const int r2 = dis2(gen);
+
+        double new_ll = cache.compute_new_loglik_fast(r1, r2);
+        double dl;
+        if (l_0 == -std::numeric_limits<double>::infinity()) {
+             if (new_ll > -std::numeric_limits<double>::infinity()) dl = std::numeric_limits<double>::infinity();
+             else dl = 0.0;
+        } else {
+             dl = new_ll - l_0;
+        }
+
+        if (std::log(dis3(gen)) < dl) {
+            cache.commit_fast(new_ll);
+            l_0 = new_ll;
+		} else {
+			// compute_new_loglik_fast's fast_staged_* is simply left
+			// unused; nothing needs discarding.
+		}
+
+        tree_list[static_cast<size_t>(i) + 1] = cache.E + 1;
+	}
+
+	return tree_list;
+}
+
 struct SeededTreeChainWorker : public Worker {
     const std::vector< arma::Col<int> >& start_edges;
     const std::vector< std::vector<double> >& logP;
@@ -1317,7 +2015,10 @@ struct SeededTreeChainWorker : public Worker {
 
     void operator()(std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i) {
-            chain_results[i] = tree_mcmc_cpp_cached_threadsafe(start_edges[i], logP, logA, max_iter_vec[i], seeds[i], false);
+            // Validated bit-identical to tree_mcmc_cpp_cached_threadsafe
+            // (the O(depth) baseline, kept as-is and unused in production
+            // from here on) -- see NNI_CACHE_BIDIRECTIONAL_NOTES.md.
+            chain_results[i] = tree_mcmc_cpp_cached_threadsafe_fast(start_edges[i], logP, logA, max_iter_vec[i], seeds[i], false);
         }
     }
 };
@@ -1611,7 +2312,10 @@ struct MC3UpdateWorker : public Worker {
             for (int iter = block_start; iter < final_iter; ++iter) {
                 const int edge_n = edge_dist(gen);
                 const int which = move_dist(gen);
-                const double new_ll = caches[task]->compute_new_loglik(edge_n, which, true);
+                // Validated bit-identical to the O(depth)
+                // compute_new_loglik/commit_staged_nni baseline this
+                // replaces -- see NNI_CACHE_BIDIRECTIONAL_NOTES.md.
+                const double new_ll = caches[task]->compute_new_loglik_fast(edge_n, which);
                 double delta;
                 if (loglik[task] == -std::numeric_limits<double>::infinity()) {
                     delta = new_ll > -std::numeric_limits<double>::infinity()
@@ -1620,10 +2324,11 @@ struct MC3UpdateWorker : public Worker {
                     delta = (new_ll - loglik[task]) / temperatures[temperature];
                 }
                 if (std::log(uniform(gen)) < delta) {
-                    caches[task]->commit_staged_nni();
+                    caches[task]->commit_fast(new_ll);
                     loglik[task] = new_ll;
                 } else {
-                    caches[task]->discard_staged_nni();
+                    // compute_new_loglik_fast doesn't stage anything
+                    // requiring cleanup on reject.
                 }
                 if (temperature == 0) {
                     cold_traces[ensemble][static_cast<std::size_t>(iter) + 1] =
