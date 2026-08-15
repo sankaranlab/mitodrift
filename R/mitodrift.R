@@ -533,7 +533,8 @@ run_tree_mcmc_batch = function(
     batch_size = 1000, conv_thres = NULL, resume = FALSE,
     mc3_temperatures = NULL, mc3_swap_interval = 10L, mc3_ncores = NULL,
     mc3_statefile = NULL,
-    checkpoint_every = 1L
+    checkpoint_every = 1L,
+    return_trace = TRUE
 ) {
 
     RhpcBLASctl::blas_set_num_threads(1)
@@ -650,7 +651,7 @@ run_tree_mcmc_batch = function(
         message('Remaining iterations per chain: ', remaining)
         if (remaining <= 0L) {
             message('All chains have completed the requested iterations.')
-            return(edge_list_all)
+            return(if (return_trace) edge_list_all else invisible(NULL))
         }
         total_batches = ceiling(remaining / batch_size)
         message('Running MCMC with ', length(chains), ' chains in up to ', total_batches, ' batches of ', batch_size)
@@ -659,7 +660,7 @@ run_tree_mcmc_batch = function(
             last_asdsf <- utils::tail(diag_history$asdsf, 1)
             if (last_asdsf <= conv_thres) {
                 message('Convergence threshold (ASDSF) already reached (', signif(last_asdsf, 4), '). Nothing to run.')
-                return(edge_list_all)
+                return(if (return_trace) edge_list_all else invisible(NULL))
             } else {
                 message('Last recorded ASDSF: ', signif(last_asdsf, 4))
             }
@@ -668,10 +669,35 @@ run_tree_mcmc_batch = function(
                 ' (batch size ', batch_size, '; no iteration cap)')
     }
 
+    # From here on the full historical trace is only needed on disk, not in R
+    # memory: ASDSF is already updated incrementally per batch (asdsf_state
+    # above), the on-disk file is guaranteed up to date whenever the loop
+    # exits (persist_batch below always fires on the final batch), and the
+    # return value is reconstructed with a single read at the very end.
+    # Keeping `edge_list_all` growing for the whole run is unnecessary and,
+    # for large trees run to convergence, can end up dwarfing the NNICache's
+    # own (fixed-size) memory footprint -- see NNI_CACHE_BIDIRECTIONAL_NOTES.md
+    # for the sizing comparison that motivated this change. `last_tree` seeds
+    # the next batch; `pending` accumulates only what hasn't been flushed to
+    # disk yet, so peak memory is bounded by `checkpoint_every` batches'
+    # worth of trace, not by the total iteration count.
+    last_tree = lapply(edge_list_all, function(chain_list) chain_list[[length(chain_list)]])
+    pending = vector('list', nchains)
+    for (i in chains) pending[[i]] = list()
+    names(pending) = as.character(chains)
+    rm(edge_list_all)
+    # Whether `outfile` legitimately holds this call's own prior trace. TRUE
+    # on a real resume (already verified against completed_iters above); on a
+    # fresh run it starts FALSE so the first checkpoint below overwrites
+    # rather than merges -- otherwise a stale file left at the same path by
+    # an unrelated earlier run would get silently prepended, doubling the
+    # trace. Flips to TRUE once this call has written its own first
+    # checkpoint, since later checkpoints in the same call may safely read
+    # back what they themselves just wrote.
+    disk_has_own_base = resume
+
     batch_idx = 0L
     repeat {
-        completed_iters = length(edge_list_all[[1]]) - 1L
-
         if (is.null(conv_thres)) {
             remaining = max_iter - completed_iters
             if (remaining <= 0L) {
@@ -691,9 +717,7 @@ run_tree_mcmc_batch = function(
         ptm <- proc.time()
 
         iter_vec = rep(iter_this_batch, length(chains))
-        start_edges = lapply(edge_list_all, function(chain_list) {
-            chain_list[[length(chain_list)]]
-        })
+        start_edges = last_tree
         seed_index <- if (use_mc3) completed_iters else batch_idx - 1L
         seed_vec = as.integer((1000003 * seed_index + chains) %% .Machine$integer.max)
 
@@ -723,15 +747,19 @@ run_tree_mcmc_batch = function(
             )
         }
 
-        new_edge_list_chains <- vector('list', length(edge_list_all))
-        for (chain_id in seq_along(edge_list_all)) {
+        new_edge_list_chains <- vector('list', nchains)
+        for (chain_id in chains) {
             elist = restore_elist(elist_active[[chain_id]])
             if (length(elist) > 0) {
                 elist = elist[-1]
             }
             new_edge_list_chains[[chain_id]] <- elist
-            edge_list_all[[chain_id]] = c(edge_list_all[[chain_id]], elist)
+            pending[[chain_id]] = c(pending[[chain_id]], elist)
+            if (length(elist) > 0) {
+                last_tree[[chain_id]] = elist[[length(elist)]]
+            }
         }
+        completed_iters = completed_iters + iter_this_batch
 
         asdsf_state <- update_target_tree_asdsf_state(
             asdsf_state, phy_init, new_edge_list_chains, rooted = TRUE)
@@ -740,7 +768,7 @@ run_tree_mcmc_batch = function(
         if (!is.null(diagfile)) {
             diag_entry = data.frame(
                 batch = batch_idx,
-                completed_iters = length(edge_list_all[[1]]) - 1L,
+                completed_iters = completed_iters,
                 asdsf = asdsf,
                 mc3_swap_acceptance = if (use_mc3) {
                     sum(mc3_checkpoint$swap_accepts) / sum(mc3_checkpoint$swap_attempts)
@@ -749,13 +777,31 @@ run_tree_mcmc_batch = function(
             diag_history = bind_rows(diag_history, diag_entry)
         }
         converged <- !is.null(conv_thres) && !is.na(asdsf) && asdsf <= conv_thres
-        fixed_complete <- is.null(conv_thres) &&
-            length(edge_list_all[[1]]) - 1L >= max_iter
+        fixed_complete <- is.null(conv_thres) && completed_iters >= max_iter
         persist_batch <- batch_idx %% checkpoint_every == 0L || converged || fixed_complete
         if (persist_batch) {
-            qs2::qd_save(edge_list_all, outfile, nthreads = ncores_qs)
+            # Merge whatever is already on disk (from a previous checkpoint
+            # of *this* call, or a genuine resume) with the pending batches,
+            # so the on-disk file always holds the complete trace -- same
+            # contract as before, just assembled without keeping it all
+            # resident. On a fresh run's first checkpoint, disk_has_own_base
+            # is FALSE, so any stale file left at this path by an unrelated
+            # earlier run is overwritten rather than merged onto.
+            on_disk = if (disk_has_own_base) safe_read_chain(outfile, ncores = ncores_qs) else NULL
+            merged = vector('list', nchains)
+            for (chain_id in chains) {
+                base = if (is.null(on_disk)) NULL else on_disk[[chain_id]]
+                if (is.null(base) || length(base) == 0) base = list(phy_init$edge)
+                merged[[chain_id]] = c(base, pending[[chain_id]])
+            }
+            names(merged) = as.character(chains)
+            qs2::qd_save(merged, outfile, nthreads = ncores_qs)
+            rm(on_disk, merged)
+            disk_has_own_base = TRUE
+            for (i in chains) pending[[i]] = list()
+
             if (use_mc3) {
-                mc3_checkpoint$completed_iters <- length(edge_list_all[[1]]) - 1L
+                mc3_checkpoint$completed_iters <- completed_iters
                 saveRDS(mc3_checkpoint, mc3_statefile)
             }
             if (!is.null(diagfile)) saveRDS(diag_history, diagfile)
@@ -768,7 +814,15 @@ run_tree_mcmc_batch = function(
         message(paste('Completed', batch_label, paste0('(', signif(batch_time[['elapsed']], 2), 's', ')')))
     }
 
-    return(edge_list_all)
+    # persist_batch always fires on the loop's final batch (converged or
+    # fixed_complete), so the file is guaranteed to hold the complete,
+    # up-to-date trace here -- reconstruct the return value from it rather
+    # than from an in-memory accumulator. Skippable via return_trace = FALSE
+    # for callers (e.g. Mitodrift$run_mcmc()) that only need the checkpointed
+    # file on disk and would otherwise pay for reading the whole trace back
+    # just to discard it.
+    if (!return_trace) return(invisible(NULL))
+    return(safe_read_chain(outfile, ncores = ncores_qs))
 }
 
 #' Restore edge-list vectors to 2-column matrices

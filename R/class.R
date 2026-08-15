@@ -399,7 +399,8 @@ MitoDrift <- R6::R6Class("MitoDrift",
                 mc3_swap_interval = mc3_swap_interval,
                 mc3_ncores = mc3_ncores,
                 mc3_statefile = mc3_statefile,
-                checkpoint_every = checkpoint_every
+                checkpoint_every = checkpoint_every,
+                return_trace = FALSE
             )
             
             message('Phylogenetic MCMC completed!')
