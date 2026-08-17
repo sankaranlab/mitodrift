@@ -447,17 +447,17 @@ MitoDrift <- R6::R6Class("MitoDrift",
             }
             
             ncores_qs <- if (isTRUE(qs2:::check_TBB())) ncores_qs else 1L
-            message('Loading MCMC results from ', mcmc_trace_file, ' using ', ncores_qs, ' cores')
-            res_mcmc <- safe_read_chain(mcmc_trace_file, ncores = ncores_qs)
-            if (is.null(res_mcmc)) {
-                stop('No MCMC trace found at ', mcmc_trace_file, ' (or its .blocks/ directory)')
-            }
-            
-            message('Collecting MCMC chains with burnin ', burnin, ' and max_iter ', max_iter, ' using ', ncores, ' cores...')
-            edges_mcmc <- collect_edges(res_mcmc, burnin = burnin, max_iter = max_iter)
-            
-            message('Adding clade frequencies to tree with ', ncores, ' cores...')
-            self$tree_annot <- add_clade_freq(tree, edges_mcmc, ncores = ncores)
+            message('Streaming MCMC trace from ', mcmc_trace_file,
+                    ' (burnin ', burnin, ', max_iter ', max_iter, ') using ',
+                    ncores_qs, ' qs2 core(s) and ', ncores, ' clade-count core(s)...')
+            # Streams the trace block-by-block and accumulates clade counts
+            # incrementally instead of loading the whole (possibly far larger
+            # decompressed than on-disk) trace into R at once -- see
+            # streaming_clade_freq()'s docs for why this matters for long
+            # block-wise traces.
+            self$tree_annot <- streaming_clade_freq(
+                tree, mcmc_trace_file, burnin = burnin, max_iter = max_iter,
+                ncores = ncores, ncores_qs = ncores_qs)
             
             message('Tree annotation completed!')
         },

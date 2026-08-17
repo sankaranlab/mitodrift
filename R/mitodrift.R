@@ -1010,3 +1010,91 @@ add_clade_freq = function(phy, edge_list, rooted = TRUE, ncores = 1) {
     phy$node.label = freqs
     return(phy)
 }
+
+#' Add clade frequencies to a tree by streaming an on-disk trace
+#'
+#' Equivalent to `add_clade_freq(phy, collect_edges(safe_read_chain(path), ...))`,
+#' but never materializes the whole trace in R at once. `safe_read_chain()`
+#' reads every block file (and the legacy file, if any) fully into memory
+#' before burn-in is applied -- for a long block-wise trace (one block per
+#' MCMC batch, `run_tree_mcmc_batch()`'s default `checkpoint_every = 1`) the
+#' decompressed in-memory size can be an order of magnitude larger than the
+#' on-disk (qs2/zstd-compressed) size, since raw integer edge matrices
+#' compress heavily but every element still has to become a live R object to
+#' be scanned. `prop_clades_par()` only needs to *scan* trees to accumulate
+#' bipartition counts (`normalize = FALSE`), which is associative across any
+#' partition of the tree list -- so this reads one block at a time, trims
+#' burnin/max_iter using a running per-chain element count (reproducing
+#' exactly the slice `collect_edges()` would take from the fully-concatenated
+#' list), accumulates raw counts, and discards the block before reading the
+#' next. Peak memory is bounded by one block (`checkpoint_every` batches x
+#' `nchains`), not by the whole trace.
+#'
+#' @param phy A reference phylogeny of class `phylo` (the base tree to annotate).
+#' @param path Trace file path, as passed to `safe_read_chain()`/`run_tree_mcmc_batch()`.
+#' @param burnin Integer; number of initial samples to discard per chain.
+#' @param max_iter Numeric; maximum per-chain sample index to retain.
+#' @param rooted Logical; whether to treat the trees as rooted. Default `TRUE`.
+#' @param ncores Integer; threads for the clade-counting scan (`RcppParallel`).
+#' @param ncores_qs Integer; threads for `qs2` deserialization of each block.
+#' @return A phylo object with clade frequencies added as node labels.
+#' @keywords internal
+#' @noRd
+streaming_clade_freq = function(phy, path, burnin = 0, max_iter = Inf, rooted = TRUE, ncores = 1, ncores_qs = 1) {
+    if (max_iter < burnin) {
+        stop('Max iter needs to be greater than burnin')
+    }
+    RhpcBLASctl::blas_set_num_threads(1)
+    RhpcBLASctl::omp_set_num_threads(1)
+    RcppParallel::setThreadOptions(numThreads = ncores)
+    phy = reorder_phylo(phy) # prop_clades_par requires phylo in postorder
+
+    legacy_exists = file.exists(path) && !dir.exists(path)
+    block_files = list_trace_blocks(path)
+    if (!legacy_exists && length(block_files) == 0) {
+        stop('No MCMC trace found at ', path, ' (or its .blocks/ directory)')
+    }
+
+    counts = NULL
+    total_n = 0
+    seen = list() # per-chain count of elements consumed so far, across chunks in order
+
+    consume_chunk = function(chunk) {
+        keep = list()
+        for (nm in names(chunk)) {
+            elist = chunk[[nm]]
+            L = length(elist)
+            if (L == 0) next
+            prev_seen = if (is.null(seen[[nm]])) 0L else seen[[nm]]
+            seen[[nm]] <<- prev_seen + L
+            # local (within-chunk) bounds equivalent to the global
+            # [burnin+1, max_iter] slice collect_edges() would take from the
+            # fully-concatenated per-chain list
+            lo = max(1L, burnin - prev_seen + 1L)
+            hi = min(L, max_iter - prev_seen)
+            if (lo > hi) next
+            keep = c(keep, elist[lo:hi])
+        }
+        if (length(keep) == 0) return(invisible())
+        raw = prop_clades_par(phy$edge, keep, rooted = rooted, normalize = FALSE)
+        counts <<- if (is.null(counts)) raw else counts + raw
+        total_n <<- total_n + length(keep)
+    }
+
+    if (legacy_exists) {
+        legacy = read_qs2_file(path, ncores = ncores_qs)
+        if (!is.null(legacy)) consume_chunk(legacy)
+        rm(legacy)
+    }
+    for (bf in block_files) {
+        blk = read_qs2_file(bf, ncores = ncores_qs)
+        if (!is.null(blk)) consume_chunk(blk)
+        rm(blk)
+    }
+
+    if (is.null(counts) || total_n == 0) {
+        stop('No post-burnin MCMC samples available to compute clade frequencies')
+    }
+    phy$node.label = counts / total_n
+    return(phy)
+}
