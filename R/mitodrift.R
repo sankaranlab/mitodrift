@@ -576,7 +576,16 @@ safe_read_chain = function(path, ncores = 1) {
 #'   `ncores`; set it up to `nchains * length(mc3_temperatures)` to update all
 #'   ensemble-temperature pairs concurrently when those CPUs are allocated.
 #' @param mc3_statefile Optional RDS checkpoint for heated-chain states and
-#'   swap statistics. Defaults to `paste0(outfile, ".mc3_state.rds")`.
+#'   swap statistics. Defaults to `paste0(outfile, ".mc3_state.rds")`. Also
+#'   carries an `asdsf_state` field (the incremental target-clade ASDSF
+#'   accumulator's tiny `counts`/`totals` state, not the trace) once a run has
+#'   completed at least one batch -- when present on an MC3 resume, this lets
+#'   the run skip reading the full historical trace back into memory
+#'   entirely, since MC3 continuation state lives here, not in the cold-chain
+#'   trace, so nothing from the trace itself is otherwise needed at resume
+#'   time. Checkpoints from before this field existed simply lack it, so
+#'   resume falls back to reconstructing ASDSF state from the full trace, as
+#'   before -- fully backward compatible.
 #' @param checkpoint_every Positive integer; persist a new checkpoint and the
 #'   sampler state every this many diagnostic batches. The final batch is always
 #'   persisted. Values greater than one reduce I/O at the cost of re-running up
@@ -668,38 +677,64 @@ run_tree_mcmc_batch = function(
         if (dir.exists(blocks_dir)) unlink(blocks_dir, recursive = TRUE)
     }
 
-    edge_list_all = if (resume) safe_read_chain(outfile, ncores = ncores_qs) else NULL
-    if (is.null(edge_list_all)) {
-        edge_list_all = vector('list', nchains)
-    } else {
-        length(edge_list_all) = nchains
-    }
-
-    max_len = if (is.null(conv_thres)) max_iter + 1L else NULL
-    for (i in seq_along(edge_list_all)) {
-        chain_list = edge_list_all[[i]]
-        if (is.null(chain_list) || length(chain_list) == 0) {
-            edge_list_all[[i]] = list(phy_init$edge)
-            next
-        }
-        if (!is.null(max_len) && length(chain_list) > max_len) {
-            edge_list_all[[i]] = chain_list[seq_len(max_len)]
-        }
-    }
-    names(edge_list_all) = as.character(chains)
-
+    # MC3 fast-resume: if the heated-state checkpoint already carries an asdsf_state
+    # field (written below on any run that completed at least one batch under this
+    # code), skip the full-trace read entirely. MC3 continuation state lives entirely
+    # in mc3_checkpoint$states (used directly by tree_mc3_parallel_seeded() below); the
+    # cold-chain trace itself is not consulted by the MC3 sampling path at all (unlike
+    # the ordinary-MCMC path, which does need the trace's last tree per chain as its
+    # starting point). Checkpoints from before this field existed simply lack it, so
+    # this falls back to the slow path below with no special-case handling needed.
     mc3_checkpoint <- NULL
+    asdsf_fastpath <- FALSE
     if (use_mc3 && resume && file.exists(mc3_statefile)) {
         mc3_checkpoint <- readRDS(mc3_statefile)
         if (!identical(as.numeric(mc3_checkpoint$temperatures), mc3_temperatures) ||
             !identical(as.integer(mc3_checkpoint$swap_interval), mc3_swap_interval)) {
             stop('MC3 checkpoint temperature ladder or swap interval does not match the requested run')
         }
-        checkpoint_iter <- if (is.null(mc3_checkpoint$completed_iters)) NA_integer_ else as.integer(mc3_checkpoint$completed_iters)
-        trace_iter <- length(edge_list_all[[1]]) - 1L
-        if (is.na(checkpoint_iter) || checkpoint_iter != trace_iter) {
-            stop('MC3 heated-state checkpoint is not synchronized with the cold-chain trace')
+        asdsf_fastpath <- !is.null(mc3_checkpoint$asdsf_state)
+    }
+
+    if (asdsf_fastpath) {
+        message('MC3 fast-resume: asdsf state found in checkpoint, skipping full-trace read ',
+                '(peak memory no longer grows with total accumulated iterations on resume)')
+        edge_list_all <- NULL  # deliberately not loaded -- last_tree (derived from it) is
+                                # unused on the MC3 sampling path, see below
+        completed_iters <- as.integer(mc3_checkpoint$completed_iters)
+        asdsf_state <- mc3_checkpoint$asdsf_state
+    } else {
+        edge_list_all = if (resume) safe_read_chain(outfile, ncores = ncores_qs) else NULL
+        if (is.null(edge_list_all)) {
+            edge_list_all = vector('list', nchains)
+        } else {
+            length(edge_list_all) = nchains
         }
+
+        max_len = if (is.null(conv_thres)) max_iter + 1L else NULL
+        for (i in seq_along(edge_list_all)) {
+            chain_list = edge_list_all[[i]]
+            if (is.null(chain_list) || length(chain_list) == 0) {
+                edge_list_all[[i]] = list(phy_init$edge)
+                next
+            }
+            if (!is.null(max_len) && length(chain_list) > max_len) {
+                edge_list_all[[i]] = chain_list[seq_len(max_len)]
+            }
+        }
+        names(edge_list_all) = as.character(chains)
+
+        if (!is.null(mc3_checkpoint)) {
+            checkpoint_iter <- if (is.null(mc3_checkpoint$completed_iters)) NA_integer_ else as.integer(mc3_checkpoint$completed_iters)
+            trace_iter <- length(edge_list_all[[1]]) - 1L
+            if (is.na(checkpoint_iter) || checkpoint_iter != trace_iter) {
+                stop('MC3 heated-state checkpoint is not synchronized with the cold-chain trace')
+            }
+        }
+
+        completed_iters = length(edge_list_all[[1]]) - 1L
+        asdsf_state <- initialize_target_tree_asdsf_state(
+            phy_init, edge_list_all, rooted = TRUE)
     }
     if (use_mc3 && is.null(mc3_checkpoint)) {
         if (resume && any(lengths(edge_list_all) > 1L)) {
@@ -715,19 +750,25 @@ run_tree_mcmc_batch = function(
         )
     }
 
-    completed_iters = length(edge_list_all[[1]]) - 1L
     if (nrow(diag_history) > 0L && 'completed_iters' %in% names(diag_history)) {
         diag_history <- diag_history[diag_history$completed_iters <= completed_iters, , drop = FALSE]
     }
-    asdsf_state <- initialize_target_tree_asdsf_state(
-        phy_init, edge_list_all, rooted = TRUE)
+
+    # Early-return trace value: reuse the in-memory edge_list_all when the slow path
+    # already loaded it (byte-identical to what it always returned); the fast path
+    # doesn't have it in memory, so read it fresh here rather than returning NULL --
+    # this is the rare instant-already-done case, not the steady-state resume this
+    # optimization targets, so paying for one read here doesn't defeat the point.
+    get_return_trace <- function() {
+        if (!is.null(edge_list_all)) edge_list_all else safe_read_chain(outfile, ncores = ncores_qs)
+    }
 
     if (is.null(conv_thres)) {
         remaining = max_iter - completed_iters
         message('Remaining iterations per chain: ', remaining)
         if (remaining <= 0L) {
             message('All chains have completed the requested iterations.')
-            return(if (return_trace) edge_list_all else invisible(NULL))
+            return(if (return_trace) get_return_trace() else invisible(NULL))
         }
         total_batches = ceiling(remaining / batch_size)
         message('Running MCMC with ', length(chains), ' chains in up to ', total_batches, ' batches of ', batch_size)
@@ -736,7 +777,7 @@ run_tree_mcmc_batch = function(
             last_asdsf <- utils::tail(diag_history$asdsf, 1)
             if (last_asdsf <= conv_thres) {
                 message('Convergence threshold (ASDSF) already reached (', signif(last_asdsf, 4), '). Nothing to run.')
-                return(if (return_trace) edge_list_all else invisible(NULL))
+                return(if (return_trace) get_return_trace() else invisible(NULL))
             } else {
                 message('Last recorded ASDSF: ', signif(last_asdsf, 4))
             }
@@ -757,7 +798,16 @@ run_tree_mcmc_batch = function(
     # the next batch; `pending` accumulates only what hasn't been flushed to
     # disk yet, so peak memory is bounded by `checkpoint_every` batches'
     # worth of trace, not by the total iteration count.
-    last_tree = lapply(edge_list_all, function(chain_list) chain_list[[length(chain_list)]])
+    # last_tree seeds tree_mcmc_parallel_seeded()'s starting point on the ordinary-MCMC
+    # path; MC3 continuation instead comes entirely from mc3_checkpoint$states, so
+    # last_tree is unused whenever use_mc3 is TRUE (in particular, on the fast-resume
+    # path above, where edge_list_all is deliberately not loaded and last_tree is simply
+    # a placeholder that gets overwritten per-chain in the batch loop regardless).
+    last_tree = if (is.null(edge_list_all)) {
+        vector('list', nchains)
+    } else {
+        lapply(edge_list_all, function(chain_list) chain_list[[length(chain_list)]])
+    }
     pending = vector('list', nchains)
     for (i in chains) pending[[i]] = list()
     names(pending) = as.character(chains)
@@ -884,6 +934,13 @@ run_tree_mcmc_batch = function(
 
             if (use_mc3) {
                 mc3_checkpoint$completed_iters <- completed_iters
+                # asdsf_state is tiny (nchains x n_target_clades counts + a length-nchains
+                # totals vector) -- carrying it here is what lets a later resume skip
+                # reconstructing it from the full historical trace (see asdsf_fastpath
+                # above). No separate file: this is already written/read at exactly the
+                # cadence needed, so a second checkpoint file would just be more state to
+                # keep in sync for no benefit.
+                mc3_checkpoint$asdsf_state <- asdsf_state
                 saveRDS(mc3_checkpoint, mc3_statefile)
             }
             if (!is.null(diagfile)) saveRDS(diag_history, diagfile)
