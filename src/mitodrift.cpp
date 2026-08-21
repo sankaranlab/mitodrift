@@ -2339,15 +2339,16 @@ struct MC3UpdateWorker : public Worker {
     }
 };
 
-// [[Rcpp::export]]
-List tree_mc3_parallel_seeded(
+List tree_mc3_parallel_seeded_impl(
     std::vector<std::vector<arma::Col<int>>> start_edges,
     const std::vector<std::vector<double>>& logP,
     const std::vector<double>& logA,
     const std::vector<int>& max_iter_vec,
     const std::vector<int>& seeds,
     const std::vector<double>& temperatures,
-    int swap_interval = 10) {
+    int swap_interval,
+    bool deterministic_even_odd,
+    int deo_phase) {
 
     const std::size_t nchains = start_edges.size();
     const std::size_t ntemps = temperatures.size();
@@ -2358,6 +2359,7 @@ List tree_mc3_parallel_seeded(
         stop("MC3 temperatures must start at 1");
     }
     if (swap_interval < 1) stop("swap_interval must be positive");
+    if (deo_phase != 0 && deo_phase != 1) stop("deo_phase must be 0 or 1");
     for (std::size_t temperature = 0; temperature < ntemps; ++temperature) {
         if (!std::isfinite(temperatures[temperature]) || temperatures[temperature] < 1.0 ||
             (temperature > 0 && temperatures[temperature] <= temperatures[temperature - 1])) {
@@ -2456,25 +2458,43 @@ List tree_mc3_parallel_seeded(
             for (std::size_t ensemble = 0; ensemble < nchains; ++ensemble) {
                 if (max_iter_vec[ensemble] < swap_boundary) continue;
                 std::mt19937& gen = swap_rngs[ensemble];
-                std::uniform_int_distribution<> pair_dist(
-                    0, static_cast<int>(ntemps) - 2);
                 std::uniform_real_distribution<> uniform(0.0, 1.0);
-                const int pair = pair_dist(gen);
-                const int next = pair + 1;
-                const std::size_t first_task =
-                    ensemble * ntemps + static_cast<std::size_t>(pair);
-                const std::size_t second_task = first_task + 1;
-                const double beta_i = 1.0 / temperatures[static_cast<std::size_t>(pair)];
-                const double beta_j = 1.0 / temperatures[static_cast<std::size_t>(next)];
-                const double log_alpha = (beta_i - beta_j) *
-                    (loglik[second_task] - loglik[first_task]);
-                const std::size_t stat_index = ensemble * (ntemps - 1) +
-                    static_cast<std::size_t>(pair);
-                swap_attempts[stat_index]++;
-                if (std::log(uniform(gen)) < log_alpha) {
-                    std::swap(caches[first_task], caches[second_task]);
-                    std::swap(loglik[first_task], loglik[second_task]);
-                    swap_accepts[stat_index]++;
+                const auto attempt_swap = [&](int pair) {
+                    const int next = pair + 1;
+                    const std::size_t first_task =
+                        ensemble * ntemps + static_cast<std::size_t>(pair);
+                    const std::size_t second_task = first_task + 1;
+                    const double beta_i = 1.0 / temperatures[static_cast<std::size_t>(pair)];
+                    const double beta_j = 1.0 / temperatures[static_cast<std::size_t>(next)];
+                    const double log_alpha = (beta_i - beta_j) *
+                        (loglik[second_task] - loglik[first_task]);
+                    const std::size_t stat_index = ensemble * (ntemps - 1) +
+                        static_cast<std::size_t>(pair);
+                    swap_attempts[stat_index]++;
+                    if (std::log(uniform(gen)) < log_alpha) {
+                        std::swap(caches[first_task], caches[second_task]);
+                        std::swap(loglik[first_task], loglik[second_task]);
+                        swap_accepts[stat_index]++;
+                    }
+                };
+
+                if (deterministic_even_odd) {
+                    // Deterministic even-odd (DEO) non-overlapping exchange:
+                    // (0,1),(2,3),... at the first barrier, then
+                    // (1,2),(3,4),... at the next. Every adjacent pair gets a
+                    // regular opportunity without attempting overlapping
+                    // swaps within one barrier.
+                    const int parity =
+                        (deo_phase + block_start / swap_interval) % 2;
+                    for (int pair = parity;
+                         pair < static_cast<int>(ntemps) - 1;
+                         pair += 2) {
+                        attempt_swap(pair);
+                    }
+                } else {
+                    std::uniform_int_distribution<> pair_dist(
+                        0, static_cast<int>(ntemps) - 2);
+                    attempt_swap(pair_dist(gen));
                 }
                 // The serial implementation records the cold state after a swap.
                 cold_traces[ensemble][static_cast<std::size_t>(swap_boundary)] =
@@ -2506,4 +2526,35 @@ List tree_mc3_parallel_seeded(
         _["swap_attempts"] = attempts,
         _["swap_accepts"] = accepts,
         _["temperatures"] = temperatures);
+}
+
+// [[Rcpp::export]]
+List tree_mc3_parallel_seeded(
+    std::vector<std::vector<arma::Col<int>>> start_edges,
+    const std::vector<std::vector<double>>& logP,
+    const std::vector<double>& logA,
+    const std::vector<int>& max_iter_vec,
+    const std::vector<int>& seeds,
+    const std::vector<double>& temperatures,
+    int swap_interval = 10) {
+
+    return tree_mc3_parallel_seeded_impl(
+        start_edges, logP, logA, max_iter_vec, seeds, temperatures,
+        swap_interval, false, 0);
+}
+
+// [[Rcpp::export]]
+List tree_mc3_parallel_seeded_deo(
+    std::vector<std::vector<arma::Col<int>>> start_edges,
+    const std::vector<std::vector<double>>& logP,
+    const std::vector<double>& logA,
+    const std::vector<int>& max_iter_vec,
+    const std::vector<int>& seeds,
+    const std::vector<double>& temperatures,
+    int swap_interval = 10,
+    int deo_phase = 0) {
+
+    return tree_mc3_parallel_seeded_impl(
+        start_edges, logP, logA, max_iter_vec, seeds, temperatures,
+        swap_interval, true, deo_phase);
 }

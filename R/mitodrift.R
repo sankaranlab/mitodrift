@@ -571,7 +571,10 @@ safe_read_chain = function(path, ncores = 1) {
 #'   Metropolis-coupled MCMC. It must start at 1 and strictly increase. `NULL`
 #'   or the single value `1` runs the original independent-chain sampler.
 #' @param mc3_swap_interval Positive integer; iterations between proposed
-#'   swaps of randomly selected adjacent temperatures.
+#'   swaps of adjacent temperatures.
+#' @param mc3_swap_scheme MC3 adjacent-swap schedule. `"rnn"` preserves the
+#'   original randomly selected adjacent-pair proposal at each swap barrier;
+#'   `"deo"` alternates all disjoint even and odd adjacent pairs.
 #' @param mc3_ncores Optional number of sampling threads for MC3. Defaults to
 #'   `ncores`; set it up to `nchains * length(mc3_temperatures)` to update all
 #'   ensemble-temperature pairs concurrently when those CPUs are allocated.
@@ -603,7 +606,8 @@ safe_read_chain = function(path, ncores = 1) {
 run_tree_mcmc_batch = function(
     phy_init, logP_list, logA_vec, outfile, diagfile = NULL, diag = TRUE, max_iter = 10000, nchains = 1, ncores = 1, ncores_qs = 1,
     batch_size = 1000, conv_thres = NULL, resume = FALSE,
-    mc3_temperatures = NULL, mc3_swap_interval = 10L, mc3_ncores = NULL,
+    mc3_temperatures = NULL, mc3_swap_interval = 10L,
+    mc3_swap_scheme = c('rnn', 'deo'), mc3_ncores = NULL,
     mc3_statefile = NULL,
     checkpoint_every = 1L,
     return_trace = TRUE
@@ -619,6 +623,7 @@ run_tree_mcmc_batch = function(
         stop('checkpoint_every must be a positive integer')
     }
 
+    mc3_swap_scheme <- match.arg(mc3_swap_scheme)
     mc3_requested <- !is.null(mc3_temperatures)
     use_mc3 <- FALSE
     if (mc3_requested) {
@@ -647,6 +652,7 @@ run_tree_mcmc_batch = function(
     if (use_mc3) {
         message('MC3 enabled with temperatures: ', paste(mc3_temperatures, collapse = ', '),
                 '; adjacent swap interval: ', mc3_swap_interval,
+                '; swap scheme: ', mc3_swap_scheme,
                 '; sampling threads: ', sampling_ncores)
     }
 
@@ -689,10 +695,19 @@ run_tree_mcmc_batch = function(
     asdsf_fastpath <- FALSE
     if (use_mc3 && resume && file.exists(mc3_statefile)) {
         mc3_checkpoint <- readRDS(mc3_statefile)
-        if (!identical(as.numeric(mc3_checkpoint$temperatures), mc3_temperatures) ||
-            !identical(as.integer(mc3_checkpoint$swap_interval), mc3_swap_interval)) {
-            stop('MC3 checkpoint temperature ladder or swap interval does not match the requested run')
+        checkpoint_swap_scheme <- if (is.null(mc3_checkpoint$swap_scheme)) {
+            'rnn'
+        } else {
+            as.character(mc3_checkpoint$swap_scheme)
         }
+        if (!identical(as.numeric(mc3_checkpoint$temperatures), mc3_temperatures) ||
+            !identical(as.integer(mc3_checkpoint$swap_interval), mc3_swap_interval) ||
+            !identical(checkpoint_swap_scheme, mc3_swap_scheme)) {
+            stop('MC3 checkpoint temperature ladder, swap interval, or swap scheme does not match the requested run')
+        }
+        # Checkpoints written before swap schemes were configurable used RNN.
+        # Persist that explicit interpretation at the next checkpoint write.
+        mc3_checkpoint$swap_scheme <- checkpoint_swap_scheme
         asdsf_fastpath <- !is.null(mc3_checkpoint$asdsf_state)
     }
 
@@ -744,6 +759,8 @@ run_tree_mcmc_batch = function(
             states = lapply(chains, function(i) rep(list(phy_init$edge), length(mc3_temperatures))),
             temperatures = mc3_temperatures,
             swap_interval = mc3_swap_interval,
+            swap_scheme = mc3_swap_scheme,
+            deo_phase = 0L,
             swap_attempts = matrix(0L, nrow = nchains, ncol = length(mc3_temperatures) - 1L),
             swap_accepts = matrix(0L, nrow = nchains, ncol = length(mc3_temperatures) - 1L),
             completed_iters = 0L
@@ -850,16 +867,58 @@ run_tree_mcmc_batch = function(
         seed_vec = as.integer((1000003 * seed_index + chains) %% .Machine$integer.max)
 
         if (use_mc3) {
-            mc3_result <- tree_mc3_parallel_seeded(
-                mc3_checkpoint$states,
-                logP_list,
-                logA_vec,
-                iter_vec,
-                seed_vec,
-                mc3_temperatures,
-                mc3_swap_interval
-            )
+            if (mc3_swap_scheme == 'deo') {
+                deo_phase <- if (is.null(mc3_checkpoint$deo_phase)) {
+                    0L
+                } else {
+                    as.integer(mc3_checkpoint$deo_phase)
+                }
+                mc3_result <- tree_mc3_parallel_seeded_deo(
+                    mc3_checkpoint$states,
+                    logP_list,
+                    logA_vec,
+                    iter_vec,
+                    seed_vec,
+                    mc3_temperatures,
+                    mc3_swap_interval,
+                    deo_phase
+                )
+                mc3_checkpoint$deo_phase <- as.integer(
+                    (deo_phase + iter_this_batch %/% mc3_swap_interval) %% 2L)
+            } else {
+                mc3_result <- tree_mc3_parallel_seeded(
+                    mc3_checkpoint$states,
+                    logP_list,
+                    logA_vec,
+                    iter_vec,
+                    seed_vec,
+                    mc3_temperatures,
+                    mc3_swap_interval
+                )
+            }
             elist_active <- mc3_result$traces
+            # Keep this batch's raw swap counts separate from the cumulative
+            # checkpoint totals.  The latter are required to resume the
+            # sampler, while the former make recent/windowed acceptance
+            # diagnostics possible without losing the adjacent-pair detail.
+            # Aggregate over independent ensembles here: every column is one
+            # adjacent temperature pair and the exact integer numerators and
+            # denominators remain available in `diag_history` below.
+            mc3_batch_swap_attempts <- colSums(mc3_result$swap_attempts)
+            mc3_batch_swap_accepts <- colSums(mc3_result$swap_accepts)
+            mc3_pair_temperatures <- cbind(
+                lower = head(mc3_temperatures, -1L),
+                upper = tail(mc3_temperatures, -1L)
+            )
+            pair_names <- paste0('pair_', seq_along(mc3_batch_swap_attempts))
+            names(mc3_batch_swap_attempts) <- pair_names
+            names(mc3_batch_swap_accepts) <- pair_names
+            rownames(mc3_pair_temperatures) <- pair_names
+            mc3_batch_swap_acceptance_by_pair <- ifelse(
+                mc3_batch_swap_attempts > 0L,
+                mc3_batch_swap_accepts / mc3_batch_swap_attempts,
+                NA_real_
+            )
             mc3_checkpoint$states <- lapply(mc3_result$final_states, function(ensemble) {
                 lapply(ensemble, function(edges) matrix(edges, ncol = 2))
             })
@@ -902,6 +961,19 @@ run_tree_mcmc_batch = function(
                     sum(mc3_checkpoint$swap_accepts) / sum(mc3_checkpoint$swap_attempts)
                 } else NA_real_
             )
+            if (use_mc3) {
+                batch_attempts <- sum(mc3_batch_swap_attempts)
+                batch_accepts <- sum(mc3_batch_swap_accepts)
+                diag_entry$mc3_swap_attempts_batch <- batch_attempts
+                diag_entry$mc3_swap_accepts_batch <- batch_accepts
+                diag_entry$mc3_swap_acceptance_batch <- if (batch_attempts > 0L) {
+                    batch_accepts / batch_attempts
+                } else NA_real_
+                diag_entry$mc3_swap_attempts_by_pair_batch <- I(list(mc3_batch_swap_attempts))
+                diag_entry$mc3_swap_accepts_by_pair_batch <- I(list(mc3_batch_swap_accepts))
+                diag_entry$mc3_swap_acceptance_by_pair_batch <- I(list(mc3_batch_swap_acceptance_by_pair))
+                diag_entry$mc3_swap_pair_temperatures <- I(list(mc3_pair_temperatures))
+            }
             diag_history = bind_rows(diag_history, diag_entry)
         }
         converged <- !is.null(conv_thres) && !is.na(asdsf) && asdsf <= conv_thres

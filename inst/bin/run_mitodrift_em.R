@@ -243,6 +243,13 @@ option_list <- list(
         metavar = "INTEGER"
     ),
     make_option(
+        c("--mc3_swap_scheme"),
+        type = "character",
+        default = "rnn",
+        help = "MC3 adjacent-swap schedule: rnn (one random pair) or deo (alternating disjoint pairs)",
+        metavar = "CHARACTER"
+    ),
+    make_option(
         c("--mc3_ncores"),
         type = "integer",
         default = NULL,
@@ -446,6 +453,7 @@ md$run_mcmc(
     resume = opts$resume,
     mc3_temperatures = opts$mc3_temperatures,
     mc3_swap_interval = opts$mc3_swap_interval,
+    mc3_swap_scheme = opts$mc3_swap_scheme,
     mc3_ncores = opts$mc3_ncores,
     mc3_statefile = file.path(opts$outdir, "tree_mc3_state.rds"),
     checkpoint_every = opts$tree_mcmc_checkpoint_every
