@@ -32,6 +32,20 @@ struct ScratchBuffers {
     double* F_v;
     double* s_full;
     double* max_t;
+    // Per-locus power-of-two exponents for the scaled-linear representation
+    // (see the scaling note on NNICache::F). exp_base carries the summed
+    // input exponents into a renormalisation; exp_extra carries the rare
+    // underflow-rescue correction out of form_triple_product. Also used as
+    // the scale slots matching the F_p2/F_p1/childF/prev_childF/F_v
+    // staging buffers above, which hold linear values and therefore each
+    // need an accompanying exponent vector.
+    int* exp_base;
+    int* exp_extra;
+    int* S_p2;
+    int* S_p1;
+    int* S_childF;
+    int* S_prev_childF;
+    int* S_F_v;
 };
 
 struct ThreadScratchBuffers {
@@ -44,9 +58,19 @@ struct ThreadScratchBuffers {
     std::vector<double> F_v;
     std::vector<double> s_full;
     std::vector<double> max_t;
+    std::vector<int> exp_base;
+    std::vector<int> exp_extra;
+    std::vector<int> S_p2;
+    std::vector<int> S_p1;
+    std::vector<int> S_childF;
+    std::vector<int> S_prev_childF;
+    std::vector<int> S_F_v;
 
     void ensure(std::size_t CL, int L) {
         auto ensure_vec = [](std::vector<double>& vec, std::size_t target) {
+            if (vec.size() < target) vec.resize(target);
+        };
+        auto ensure_ivec = [](std::vector<int>& vec, std::size_t target) {
             if (vec.size() < target) vec.resize(target);
         };
         ensure_vec(temp, CL);
@@ -58,12 +82,22 @@ struct ThreadScratchBuffers {
         ensure_vec(F_v, CL);
         ensure_vec(s_full, CL);
         ensure_vec(max_t, static_cast<std::size_t>(L));
+        const std::size_t Lz = static_cast<std::size_t>(L);
+        ensure_ivec(exp_base, Lz);
+        ensure_ivec(exp_extra, Lz);
+        ensure_ivec(S_p2, Lz);
+        ensure_ivec(S_p1, Lz);
+        ensure_ivec(S_childF, Lz);
+        ensure_ivec(S_prev_childF, Lz);
+        ensure_ivec(S_F_v, Lz);
     }
 
     ScratchBuffers view() {
         return ScratchBuffers{
             temp.data(), u.data(), F_p2.data(), F_p1.data(),
-            childF.data(), prev_childF.data(), F_v.data(), s_full.data(), max_t.data()
+            childF.data(), prev_childF.data(), F_v.data(), s_full.data(), max_t.data(),
+            exp_base.data(), exp_extra.data(), S_p2.data(), S_p1.data(),
+            S_childF.data(), S_prev_childF.data(), S_F_v.data()
         };
     }
 };
@@ -477,17 +511,44 @@ struct NNICache {
 	std::vector<double> row_maxA;				// size C
     arma::Mat<double> expA_shifted_t;    // stores exp(A) rows as columns (C x C)
     arma::Mat<double> expA_plain;         // raw exp(A), (parent row, child col) — for outside/down messages
+    arma::Mat<double> expA_plain_t;       // expA_plain transposed: (child row, parent col) — for inside/up messages
 
 	// data likelihoods
 	std::vector< std::vector<double> > logP_list;	// L × (C*n), row-major per locus
 
-	// per-locus cached child→parent contributions F (n*C) and root logZ
+	// SCALED LINEAR representation (not log space). F/G/P below hold ordinary
+	// probabilities, each normalised per (node, locus) so that
+	// max_c value[node][c][l] lies in [0.5, 1), with the discarded factor kept
+	// as an exact power of two in the matching *_scale array:
+	//
+	//     true_value[node][c][l] = value[node][c][l] * 2^scale[node*L + l]
+	//
+	// Why: in log space every node evaluation costs C*L exp() calls to leave
+	// log space plus C*L log() calls to return to it, around a matmul that is
+	// only ~3% of the work -- profiled at 33% and 53% of
+	// compute_F_vectorized respectively (GitHub issue #7). Keeping values
+	// linear makes the recursion a plain multiply -> matmul -> rescale with no
+	// transcendental per node; the only log() left in a proposal evaluation is
+	// L of them at the root. This is the standard Felsenstein scaling used by
+	// RAxML/IQ-TREE/BEAST, not an approximation: frexp/ldexp scaling is exact
+	// in binary floating point, so the sole rounding is in the multiplies,
+	// exactly as the log-space version rounds in its adds. Validated to ~1e-16
+	// relative against the log-space implementation and against the
+	// independent score_tree_bp_wrapper2 oracle.
+	//
+	// A locus whose values are all zero (impossible data, formerly -Inf)
+	// propagates as zeros and yields -Inf at the root naturally, with no
+	// special-casing: its scale entry is meaningless but never consulted.
+
+	// per-locus cached child→parent contributions F and root logZ
     // F layout: [node][c][l] -> node * (C*L) + c*L + l
-	std::vector<double> F;		// n * C * L
+	std::vector<double> F;		// n * C * L, linear
+	std::vector<int> F_scale;	// n * L, power-of-two exponent for F
 	// per-locus cached "outside" messages G (everything except node's own
 	// subtree, expressed in node's own state space). Same layout as F.
-	// G[root] is identically 0 (log 1) — the root has no outside context.
-	std::vector<double> G;		// n * C * L
+	// G[root] is identically 1 (scale 0) — the root has no outside context.
+	std::vector<double> G;		// n * C * L, linear
+	std::vector<int> G_scale;	// n * L, power-of-two exponent for G
 
 	// Lazy validity tracking for G, two layers:
 	//
@@ -548,12 +609,18 @@ struct NNICache {
 	// compute_new_loglik_fast, applied by commit_fast.
 	mutable int fast_staged_p1 = -1, fast_staged_p2 = -1;
 	mutable int fast_staged_c1 = -1, fast_staged_cX = -1, fast_staged_cStay = -1;
-	mutable std::vector<double> fast_staged_F_p2;  // CL
-	mutable std::vector<double> fast_staged_F_p1;  // CL
+	mutable std::vector<double> fast_staged_F_p2;  // CL, linear
+	mutable std::vector<double> fast_staged_F_p1;  // CL, linear
+	mutable std::vector<int> fast_staged_S_p2;     // L, scale for fast_staged_F_p2
+	mutable std::vector<int> fast_staged_S_p1;     // L, scale for fast_staged_F_p1
 	mutable bool fast_staged_ready = false;
 
 	std::vector<double> logZ;	// L
-    std::vector<double> logP_storage; // n * C * L
+    std::vector<double> logP_storage; // n * C * L, linear (see scaling note above)
+    std::vector<int> P_scale;         // n * L, power-of-two exponent for logP_storage
+    // All-ones block, the multiplicative identity, so a two-factor product can
+    // reuse the guarded three-factor form_triple_product path.
+    std::vector<double> ones_CL;      // C * L
     double current_total_loglik_val;
 
     // Scratch space for calculations to avoid reallocations
@@ -569,6 +636,13 @@ struct NNICache {
 
     // Size L
     mutable std::vector<double> scratch_max_t;
+    mutable std::vector<int> scratch_exp_base;
+    mutable std::vector<int> scratch_exp_extra;
+    mutable std::vector<int> scratch_S_p2;
+    mutable std::vector<int> scratch_S_p1;
+    mutable std::vector<int> scratch_S_childF;
+    mutable std::vector<int> scratch_S_prev_childF;
+    mutable std::vector<int> scratch_S_F_v;
     mutable std::mutex scratch_mutex;
 
     inline ScratchBuffers shared_scratch() const {
@@ -581,7 +655,14 @@ struct NNICache {
             scratch_prev_childF.data(),
             scratch_F_v.data(),
             scratch_s_full.data(),
-            scratch_max_t.data()
+            scratch_max_t.data(),
+            scratch_exp_base.data(),
+            scratch_exp_extra.data(),
+            scratch_S_p2.data(),
+            scratch_S_p1.data(),
+            scratch_S_childF.data(),
+            scratch_S_prev_childF.data(),
+            scratch_S_F_v.data()
         };
     }
 
@@ -596,6 +677,7 @@ struct NNICache {
 
     mutable std::vector<int> staged_nodes;
     mutable std::vector<double> staged_F;
+    mutable std::vector<int> staged_S;   // L entries per staged node, matching staged_F
     mutable bool staged_ready = false;
     mutable int staged_edge_n = -1;
     mutable int staged_edge_index = -1;
@@ -611,6 +693,7 @@ struct NNICache {
         staged_ready = false;
         staged_nodes.clear();
         staged_F.clear();
+        staged_S.clear();
         staged_edge_n = -1;
         staged_edge_index = -1;
         staged_which = -1;
@@ -618,9 +701,10 @@ struct NNICache {
         staged_total_loglik = -std::numeric_limits<double>::infinity();
     }
 
-    inline void stage_node_F(int node_id, const double* src) const {
+    inline void stage_node_F(int node_id, const double* src, const int* src_scale) const {
         staged_nodes.push_back(node_id);
         staged_F.insert(staged_F.end(), src, src + CL);
+        staged_S.insert(staged_S.end(), src_scale, src_scale + L);
     }
 
 	NNICache(arma::Col<int> E_in,
@@ -644,6 +728,16 @@ struct NNICache {
         scratch_s_full.resize(CL);
 
         scratch_max_t.resize(L);
+        scratch_exp_base.resize(L);
+        scratch_exp_extra.resize(L);
+        scratch_S_p2.resize(L);
+        scratch_S_p1.resize(L);
+        scratch_S_childF.resize(L);
+        scratch_S_prev_childF.resize(L);
+        scratch_S_F_v.resize(L);
+        ones_CL.assign(CL, 1.0);
+        fast_staged_S_p2.assign(L, 0);
+        fast_staged_S_p1.assign(L, 0);
         reset_staged_state_unlocked();
 
 		// Bring E to postorder and 0-indexed
@@ -694,120 +788,134 @@ struct NNICache {
             }
         }
 
-		// Transpose logP
-        logP_storage.resize(n * C * L);
-        for (int l = 0; l < L; ++l) {
-            const auto& P_l = logP_in[l];
+        // expA_plain_t(j, r) = A[r][j]: the same probabilities contracted along
+        // the child index instead, used by compute_F_vectorized. Precomputed
+        // once rather than transposing inside the hot loop.
+        expA_plain_t.set_size(C, C);
+        for (int r = 0; r < C; ++r) {
+            for (int j = 0; j < C; ++j) {
+                expA_plain_t(j, r) = expA_plain(r, j);
+            }
+        }
+
+		// Transpose logP into the scaled-linear representation: exponentiate
+		// once here, per (node, locus) normalised so max_c is in [0.5,1) with
+		// the discarded power of two kept in P_scale. Everything downstream
+		// then stays linear (see the scaling note on F).
+        logP_storage.resize(static_cast<std::size_t>(n) * C * L);
+        P_scale.assign(static_cast<std::size_t>(n) * L, 0);
+        {
+            std::vector<double> col(C);
             for (int node = 0; node < n; ++node) {
-                for (int c = 0; c < C; ++c) {
-                    // Old: P_l[c * n + node]
-                    // New: logP_storage[node * C * L + c * L + l]
-                    logP_storage[node * C * L + c * L + l] = P_l[c * n + node];
+                for (int l = 0; l < L; ++l) {
+                    const auto& P_l = logP_in[l];
+                    double mx = -std::numeric_limits<double>::infinity();
+                    for (int c = 0; c < C; ++c) {
+                        const double v = P_l[static_cast<std::size_t>(c) * n + node];
+                        col[c] = v;
+                        if (v > mx) mx = v;
+                    }
+                    const std::size_t base = static_cast<std::size_t>(node) * C * L;
+                    if (!std::isfinite(mx)) {
+                        // every state impossible at this locus: keep exact zeros
+                        for (int c = 0; c < C; ++c) logP_storage[base + c * L + l] = 0.0;
+                        P_scale[static_cast<std::size_t>(node) * L + l] = 0;
+                        continue;
+                    }
+                    // Split mx into an integer power of two plus a residual so
+                    // the stored values land in [0.5,1) without any rounding
+                    // beyond the single exp() per entry.
+                    const int e = static_cast<int>(std::ceil(mx / M_LN2));
+                    const double shift = e * M_LN2;
+                    for (int c = 0; c < C; ++c) {
+                        logP_storage[base + c * L + l] = std::exp(col[c] - shift);
+                    }
+                    P_scale[static_cast<std::size_t>(node) * L + l] = e;
                 }
             }
         }
 
-		// allocate caches
-		F.assign(n * C * L, 0.0);
-		G.assign(n * C * L, 0.0); // G[root] stays 0 (log 1): no outside context
+		// allocate caches (linear values plus per-locus power-of-two exponents)
+		F.assign(static_cast<std::size_t>(n) * C * L, 0.0);
+		F_scale.assign(static_cast<std::size_t>(n) * L, 0);
+		G.assign(static_cast<std::size_t>(n) * C * L, 0.0);
+		G_scale.assign(static_cast<std::size_t>(n) * L, 0);
+		// G[root] is identically 1 with exponent 0 (linear), the multiplicative
+		// identity -- the log-space version's 0 meant the same thing.
+		std::fill(G.begin() + static_cast<std::size_t>(root) * C * L,
+		          G.begin() + static_cast<std::size_t>(root) * C * L + CL, 1.0);
 		logZ.assign(L, 0.0);
 
-        std::vector<double> msg_nm(n * C * L, 0.0); // Accumulator for children messages
-        
+        // Multiplicative accumulator for children messages: starts at 1, the
+        // linear identity (the log-space version started at 0 for the same
+        // reason).
+        std::vector<double> msg_nm(static_cast<std::size_t>(n) * C * L, 1.0);
+        std::vector<int> msg_scale(static_cast<std::size_t>(n) * L, 0);
+
         // Scratch buffers for initialization
-        std::vector<double> init_temp(C * L);
-        std::vector<double> init_u(C * L);
-        std::vector<double> init_max_t(L);
-        std::vector<double> init_s_full(C * L);
-        
+        std::vector<double> init_temp(CL);
+        std::vector<double> init_s_full(CL);
+        std::vector<double> init_ones(CL, 1.0);
+        std::vector<int> init_extra(L);
+        std::vector<int> init_base(L);
+
         for (int i = 0; i < m; ++i) {
             const int par  = E[i];
             const int node = E[m + i];
-            
-            // Compute F[node]
-            // temp = P[node] + msg_nm[node]
-            
-            const double* P_ptr = logP_storage.data() + node * C * L;
-            const double* msg_ptr = msg_nm.data() + node * C * L;
-            double* F_ptr = F.data() + node * C * L;
-            double* msg_par_ptr = msg_nm.data() + par * C * L;
-            
-            std::fill(init_max_t.begin(), init_max_t.end(), -std::numeric_limits<double>::infinity());
-            
-            for (int c = 0; c < C; ++c) {
-                const double* p = P_ptr + c * L;
-                const double* m_ = msg_ptr + c * L;
-                double* t = init_temp.data() + c * L;
-                for (int l = 0; l < L; ++l) {
-                    double val = p[l] + m_[l];
-                    t[l] = val;
-                    if (val > init_max_t[l]) init_max_t[l] = val;
-                }
-            }
-            
-            for (int c = 0; c < C; ++c) {
-                double* t = init_temp.data() + c * L;
-                double* u = init_u.data() + c * L;
-                for (int l = 0; l < L; ++l) {
-                    if (init_max_t[l] == -std::numeric_limits<double>::infinity()) {
-                        u[l] = 0.0;
-                    } else {
-                        u[l] = std::exp(t[l] - init_max_t[l]);
-                    }
-                }
-            }
-            
-            arma::Mat<double> init_U(init_u.data(), L, C, false, true);
+
+            // F[node][r] = sum_j A[r][j] * P[node][j] * msg[node][j].
+            // msg[node] is already complete: E is in postorder, so both of
+            // node's children have been folded in before this edge is seen.
+            const double* P_ptr = logP_storage.data() + static_cast<std::size_t>(node) * C * L;
+            const int* P_sc = P_scale.data() + static_cast<std::size_t>(node) * L;
+            const double* msg_ptr = msg_nm.data() + static_cast<std::size_t>(node) * C * L;
+            const int* msg_sc = msg_scale.data() + static_cast<std::size_t>(node) * L;
+
+            form_triple_product(P_ptr, msg_ptr, init_ones.data(), init_temp.data(), init_extra.data());
+            for (int l = 0; l < L; ++l) init_base[l] = P_sc[l] + msg_sc[l] + init_extra[l];
+
+            arma::Mat<double> init_T(init_temp.data(), L, C, false, true);
             arma::Mat<double> init_S(init_s_full.data(), L, C, false, true);
-            init_S = init_U * expA_shifted_t;
-            const double* s_ptr = init_S.memptr();
-            for (int r = 0; r < C; ++r) {
-                double row_max = row_maxA[r];
-                const double* s_col = s_ptr + static_cast<size_t>(r) * L;
-                double* f = F_ptr + r * L;
-                double* mp = msg_par_ptr + r * L;
-                for (int l = 0; l < L; ++l) {
-                    if (init_max_t[l] == -std::numeric_limits<double>::infinity() || s_col[l] <= 0.0) {
-                        f[l] = -std::numeric_limits<double>::infinity();
-                        mp[l] += -std::numeric_limits<double>::infinity();
-                    } else {
-                        double val = row_max + init_max_t[l] + std::log(s_col[l]);
-                        f[l] = val;
-                        mp[l] += val;
-                    }
-                }
-            }
+            init_S = init_T * expA_plain_t;
+
+            normalize_block(init_s_full.data(),
+                            F.data() + static_cast<std::size_t>(node) * C * L,
+                            F_scale.data() + static_cast<std::size_t>(node) * L,
+                            init_base.data());
+
+            // Fold F[node] into the parent's accumulator, then renormalise it
+            // so the running product cannot drift toward underflow.
+            double* mp = msg_nm.data() + static_cast<std::size_t>(par) * C * L;
+            const double* fp = F.data() + static_cast<std::size_t>(node) * C * L;
+            for (std::size_t idx = 0; idx < CL; ++idx) mp[idx] *= fp[idx];
+            int* mps = msg_scale.data() + static_cast<std::size_t>(par) * L;
+            const int* fs = F_scale.data() + static_cast<std::size_t>(node) * L;
+            for (int l = 0; l < L; ++l) mps[l] += fs[l];
+            normalize_block(mp, mp, mps, mps);
         }
-        
+
         // Root marginal
-        const double* P_root = logP_storage.data() + root * C * L;
-        const double* msg_root = msg_nm.data() + root * C * L;
-        
-        std::fill(init_max_t.begin(), init_max_t.end(), -std::numeric_limits<double>::infinity());
-        
-        for (int c = 0; c < C; ++c) {
-            const double* p = P_root + c * L;
-            const double* m_ = msg_root + c * L;
-            double* t = init_temp.data() + c * L;
+        {
+            const double* P_root = logP_storage.data() + static_cast<std::size_t>(root) * C * L;
+            const int* P_root_sc = P_scale.data() + static_cast<std::size_t>(root) * L;
+            const double* msg_root = msg_nm.data() + static_cast<std::size_t>(root) * C * L;
+            const int* msg_root_sc = msg_scale.data() + static_cast<std::size_t>(root) * L;
+
+            form_triple_product(P_root, msg_root, init_ones.data(), init_temp.data(), init_extra.data());
+
+            current_total_loglik_val = 0.0;
             for (int l = 0; l < L; ++l) {
-                double val = p[l] + m_[l];
-                t[l] = val;
-                if (val > init_max_t[l]) init_max_t[l] = val;
-            }
-        }
-        
-        current_total_loglik_val = 0.0;
-        for (int l = 0; l < L; ++l) {
-            if (init_max_t[l] == -std::numeric_limits<double>::infinity()) {
-                logZ[l] = -std::numeric_limits<double>::infinity();
-            } else {
-                double sum_exp = 0.0;
-                for (int c = 0; c < C; ++c) {
-                    sum_exp += std::exp(init_temp[c * L + l] - init_max_t[l]);
+                double sum_c = 0.0;
+                for (int c = 0; c < C; ++c) sum_c += init_temp[static_cast<std::size_t>(c) * L + l];
+                if (sum_c > 0.0) {
+                    const double exponent =
+                        static_cast<double>(P_root_sc[l] + msg_root_sc[l] + init_extra[l]);
+                    logZ[l] = std::log(sum_c) + exponent * M_LN2;
+                } else {
+                    logZ[l] = -std::numeric_limits<double>::infinity();
                 }
-                logZ[l] = init_max_t[l] + std::log(sum_exp);
+                current_total_loglik_val += logZ[l];
             }
-            current_total_loglik_val += logZ[l];
         }
 
         // Build the outside cache G for the whole tree. F[] above is already
@@ -859,91 +967,142 @@ struct NNICache {
         return internal_edge_indices[static_cast<std::size_t>(edge_n - 1)];
     }
 
-    inline void compute_F_vectorized(
-        const double* F_c1, const double* F_c2,
-        const double* P_base,
-        double* outF,
-        const ScratchBuffers& scratch
+    // Form temp[c][l] = A_lin[c][l] * B_lin[c][l] * D_lin[c][l] for the three
+    // scaled-linear inputs, returning in extra_exp[l] any additional
+    // power-of-two correction needed for that locus.
+    //
+    // All three inputs are normalised so max_c is in [0.5,1), so the product
+    // is at most 1 -- but its max over c can still underflow to zero if the
+    // three distributions concentrate on nearly disjoint states (the product
+    // of three values each around 1e-103 or smaller). That is astronomically
+    // unlikely for this model, whose emission probabilities carry an error/
+    // contamination floor, but it would be a silent wrong answer rather than a
+    // crash, so it is detected and handled exactly rather than assumed away:
+    // the affected locus is recomputed through logs, which cannot underflow.
+    inline void form_triple_product(
+        const double* A_lin, const double* B_lin, const double* D_lin,
+        double* temp, int* extra_exp
     ) const {
-        double* u = scratch.u;
-        double* temp = scratch.temp;
-        double* max_t = scratch.max_t;
-        double* s_full = scratch.s_full;
-        const double neg_inf = -std::numeric_limits<double>::infinity();
-        std::fill(max_t, max_t + L, neg_inf);
-		
         for (int c = 0; c < C; ++c) {
-            const double* p_ptr = P_base + c * L;
-            const double* f1_ptr = F_c1 + c * L;
-            const double* f2_ptr = F_c2 + c * L;
+            const double* a_ptr = A_lin + c * L;
+            const double* b_ptr = B_lin + c * L;
+            const double* d_ptr = D_lin + c * L;
             double* t_ptr = temp + c * L;
-            for (int l = 0; l < L; ++l) {
-                double val = p_ptr[l] + f1_ptr[l] + f2_ptr[l];
-                t_ptr[l] = val;
-                if (val > max_t[l]) max_t[l] = val;
-            }
+            for (int l = 0; l < L; ++l) t_ptr[l] = a_ptr[l] * b_ptr[l] * d_ptr[l];
         }
-		
-        for (int c = 0; c < C; ++c) {
-            double* t_ptr = temp + c * L;
-            double* u_ptr = u + c * L;
-            for (int l = 0; l < L; ++l) {
-                u_ptr[l] = (max_t[l] == neg_inf) ? 0.0 : std::exp(t_ptr[l] - max_t[l]);
+        for (int l = 0; l < L; ++l) {
+            extra_exp[l] = 0;
+            double mx = 0.0;
+            for (int c = 0; c < C; ++c) {
+                const double v = temp[static_cast<std::size_t>(c) * L + l];
+                if (v > mx) mx = v;
             }
-        }
-		
-        arma::Mat<double> U_view(u, L, C, false, true);
-        arma::Mat<double> S_view(s_full, L, C, false, true);
-        S_view = U_view * expA_shifted_t;
-        const double* s_ptr = S_view.memptr();
-		
-        for (int r = 0; r < C; ++r) {
-            double row_max = row_maxA[r];
-            const double* s_col = s_ptr + static_cast<size_t>(r) * L;
-            double* out_ptr = outF + r * L;
-            for (int l = 0; l < L; ++l) {
-                if (max_t[l] == neg_inf || s_col[l] <= 0.0) {
-                    out_ptr[l] = neg_inf;
-                } else {
-                    out_ptr[l] = row_max + max_t[l] + std::log(s_col[l]);
+            if (mx > 0.0) continue;              // ordinary case, nothing to fix
+            // Either genuinely all-zero (impossible data at this locus, which
+            // must stay zero and become -Inf at the root) or an underflowed
+            // product. Distinguish, and rescue only the latter.
+            bool any_input_zero_everywhere = true;
+            for (int c = 0; c < C && any_input_zero_everywhere; ++c) {
+                const std::size_t idx = static_cast<std::size_t>(c) * L + l;
+                if (A_lin[idx] > 0.0 && B_lin[idx] > 0.0 && D_lin[idx] > 0.0) {
+                    any_input_zero_everywhere = false;
                 }
+            }
+            if (any_input_zero_everywhere) continue;   // genuine zero
+            const double neg_inf = -std::numeric_limits<double>::infinity();
+            double max_lg = neg_inf;
+            for (int c = 0; c < C; ++c) {
+                const std::size_t idx = static_cast<std::size_t>(c) * L + l;
+                const double lg = std::log(A_lin[idx]) + std::log(B_lin[idx]) + std::log(D_lin[idx]);
+                temp[idx] = lg;                        // stash the log briefly
+                if (lg > max_lg) max_lg = lg;
+            }
+            const int e = static_cast<int>(std::ceil(max_lg / M_LN2));
+            const double shift = e * M_LN2;
+            for (int c = 0; c < C; ++c) {
+                const std::size_t idx = static_cast<std::size_t>(c) * L + l;
+                temp[idx] = std::exp(temp[idx] - shift);
+            }
+            extra_exp[l] = e;
+        }
+    }
+
+    // Renormalise a C x L linear block per locus into [0.5,1) using exact
+    // power-of-two scaling (frexp/ldexp introduce no rounding), accumulating
+    // the exponent into outS.
+    inline void normalize_block(
+        const double* in, double* out, int* outS, const int* base_exp
+    ) const {
+        for (int l = 0; l < L; ++l) {
+            double mx = 0.0;
+            for (int c = 0; c < C; ++c) {
+                const double v = in[static_cast<std::size_t>(c) * L + l];
+                if (v > mx) mx = v;
+            }
+            if (mx > 0.0 && std::isfinite(mx)) {
+                int e = 0;
+                std::frexp(mx, &e);
+                const double inv = std::ldexp(1.0, -e);
+                for (int c = 0; c < C; ++c) {
+                    const std::size_t idx = static_cast<std::size_t>(c) * L + l;
+                    out[idx] = in[idx] * inv;
+                }
+                outS[l] = base_exp[l] + e;
+            } else {
+                for (int c = 0; c < C; ++c) out[static_cast<std::size_t>(c) * L + l] = 0.0;
+                outS[l] = 0;
             }
         }
     }
 
-    inline double compute_root_logZ_vectorized(
-        const double* F_c1, const double* F_c2,
-        const double* P_base,
+    // out[r][l] = sum_j A[r][j] * (P[j][l] * F_c1[j][l] * F_c2[j][l]), in
+    // scaled-linear space: no exp() and no log() anywhere on this path.
+    inline void compute_F_vectorized(
+        const double* F_c1, const int* S_c1,
+        const double* F_c2, const int* S_c2,
+        const double* P_base, const int* S_P,
+        double* outF, int* outS,
         const ScratchBuffers& scratch
     ) const {
         double* temp = scratch.temp;
-        double* max_t = scratch.max_t;
-        std::fill(max_t, max_t + L, -std::numeric_limits<double>::infinity());
-        
-        for (int c = 0; c < C; ++c) {
-            const double* p_ptr = P_base + c * L;
-            const double* f1_ptr = F_c1 + c * L;
-            const double* f2_ptr = F_c2 + c * L;
-            double* t_ptr = temp + c * L;
-            
-            for (int l = 0; l < L; ++l) {
-                double val = p_ptr[l] + f1_ptr[l] + f2_ptr[l];
-                t_ptr[l] = val;
-                if (val > max_t[l]) max_t[l] = val;
-            }
-        }
-        
+        double* s_full = scratch.s_full;
+        int* base_exp = scratch.exp_base;
+        int* extra_exp = scratch.exp_extra;
+
+        form_triple_product(P_base, F_c1, F_c2, temp, extra_exp);
+        for (int l = 0; l < L; ++l) base_exp[l] = S_P[l] + S_c1[l] + S_c2[l] + extra_exp[l];
+
+        // S(l,r) = sum_j Temp(l,j) * expA_plain_t(j,r), i.e. contract the child
+        // state index against A[r][j] -- the same contraction the log-space
+        // version did via expA_shifted_t, without the row-max shift that only
+        // existed to keep exp() in range.
+        arma::Mat<double> Temp_view(temp, L, C, false, true);
+        arma::Mat<double> S_view(s_full, L, C, false, true);
+        S_view = Temp_view * expA_plain_t;
+
+        normalize_block(s_full, outF, outS, base_exp);
+    }
+
+    // Total log-likelihood at the root: the only place logs re-enter a
+    // proposal evaluation, and only L of them rather than C*L per node.
+    inline double compute_root_logZ_vectorized(
+        const double* F_c1, const int* S_c1,
+        const double* F_c2, const int* S_c2,
+        const double* P_base, const int* S_P,
+        const ScratchBuffers& scratch
+    ) const {
+        double* temp = scratch.temp;
+        int* extra_exp = scratch.exp_extra;
+
+        form_triple_product(P_base, F_c1, F_c2, temp, extra_exp);
+
         double total_logZ = 0.0;
         for (int l = 0; l < L; ++l) {
-            if (max_t[l] == -std::numeric_limits<double>::infinity()) {
-                total_logZ += -std::numeric_limits<double>::infinity();
-            } else {
-                double sum_exp = 0.0;
-                for (int c = 0; c < C; ++c) {
-                    sum_exp += std::exp(temp[c * L + l] - max_t[l]);
-                }
-                total_logZ += max_t[l] + std::log(sum_exp);
-            }
+            double sum_c = 0.0;
+            for (int c = 0; c < C; ++c) sum_c += temp[static_cast<std::size_t>(c) * L + l];
+            if (!(sum_c > 0.0)) return -std::numeric_limits<double>::infinity();
+            const double exponent = static_cast<double>(S_P[l] + S_c1[l] + S_c2[l] + extra_exp[l]);
+            total_logZ += std::log(sum_c) + exponent * M_LN2;
         }
         if (std::isnan(total_logZ)) return -std::numeric_limits<double>::infinity();
         return total_logZ;
@@ -960,56 +1119,28 @@ struct NNICache {
     // matrix A, just contracted along the other axis, so no reversed/backward
     // transition matrix is needed.
     inline void compute_G_vectorized(
-        const double* G_parent,
-        const double* F_sibling,
-        const double* P_parent,
-        double* outG,
+        const double* G_parent, const int* S_G_parent,
+        const double* F_sibling, const int* S_F_sibling,
+        const double* P_parent, const int* S_P_parent,
+        double* outG, int* outS,
         const ScratchBuffers& scratch
     ) const {
         double* temp = scratch.temp;
-        double* u = scratch.u;
         double* s_full = scratch.s_full;
-        double* max_t = scratch.max_t;
-        const double neg_inf = -std::numeric_limits<double>::infinity();
-        std::fill(max_t, max_t + L, neg_inf);
+        int* base_exp = scratch.exp_base;
+        int* extra_exp = scratch.exp_extra;
 
-        for (int uu = 0; uu < C; ++uu) {
-            const double* p_ptr = P_parent + uu * L;
-            const double* g_ptr = G_parent + uu * L;
-            const double* f_ptr = F_sibling + uu * L;
-            double* t_ptr = temp + uu * L;
-            for (int l = 0; l < L; ++l) {
-                double val = p_ptr[l] + g_ptr[l] + f_ptr[l];
-                t_ptr[l] = val;
-                if (val > max_t[l]) max_t[l] = val;
-            }
+        form_triple_product(P_parent, G_parent, F_sibling, temp, extra_exp);
+        for (int l = 0; l < L; ++l) {
+            base_exp[l] = S_P_parent[l] + S_G_parent[l] + S_F_sibling[l] + extra_exp[l];
         }
 
-        for (int uu = 0; uu < C; ++uu) {
-            double* t_ptr = temp + uu * L;
-            double* u_ptr = u + uu * L;
-            for (int l = 0; l < L; ++l) {
-                u_ptr[l] = (max_t[l] == neg_inf) ? 0.0 : std::exp(t_ptr[l] - max_t[l]);
-            }
-        }
-
-        // T(l,k) = sum_u U(l,u) * expA_plain(u,k) = sum_u u_u(l) * A[u][k]
-        arma::Mat<double> U_view(u, L, C, false, true);
+        // T(l,k) = sum_u Temp(l,u) * expA_plain(u,k) = sum_u temp_u(l) * A[u][k]
+        arma::Mat<double> Temp_view(temp, L, C, false, true);
         arma::Mat<double> T_view(s_full, L, C, false, true);
-        T_view = U_view * expA_plain;
-        const double* t_ptr2 = T_view.memptr();
+        T_view = Temp_view * expA_plain;
 
-        for (int k = 0; k < C; ++k) {
-            const double* t_col = t_ptr2 + static_cast<size_t>(k) * L;
-            double* out_ptr = outG + k * L;
-            for (int l = 0; l < L; ++l) {
-                if (max_t[l] == neg_inf || t_col[l] <= 0.0) {
-                    out_ptr[l] = neg_inf;
-                } else {
-                    out_ptr[l] = max_t[l] + std::log(t_col[l]);
-                }
-            }
-        }
+        normalize_block(s_full, outG, outS, base_exp);
     }
 
     // Recompute G[] for every node within start_node's subtree (its children
@@ -1026,15 +1157,19 @@ struct NNICache {
             const int u_node = stack.back();
             stack.pop_back();
             const double* G_u = G.data() + static_cast<std::size_t>(u_node) * C * L;
+            const int* G_u_sc = G_scale.data() + static_cast<std::size_t>(u_node) * L;
             const double* P_u = logP_storage.data() + static_cast<std::size_t>(u_node) * C * L;
+            const int* P_u_sc = P_scale.data() + static_cast<std::size_t>(u_node) * L;
             const auto& ch = children_of[u_node];
             for (int t = 0; t < 2; ++t) {
                 const int v = ch[t];
                 if (v < 0) continue;
                 const int sib = ch[1 - t];
                 const double* F_sib = F.data() + static_cast<std::size_t>(sib) * C * L;
+                const int* F_sib_sc = F_scale.data() + static_cast<std::size_t>(sib) * L;
                 double* G_v = G.data() + static_cast<std::size_t>(v) * C * L;
-                compute_G_vectorized(G_u, F_sib, P_u, G_v, scratch);
+                int* G_v_sc = G_scale.data() + static_cast<std::size_t>(v) * L;
+                compute_G_vectorized(G_u, G_u_sc, F_sib, F_sib_sc, P_u, P_u_sc, G_v, G_v_sc, scratch);
                 stack.push_back(v);
             }
         }
@@ -1093,9 +1228,13 @@ struct NNICache {
             f_child_content_snapshot1[v] != f_content_version[c1]) {
             compute_F_vectorized(
                 F.data() + static_cast<std::size_t>(c0) * C * L,
+                F_scale.data() + static_cast<std::size_t>(c0) * L,
                 F.data() + static_cast<std::size_t>(c1) * C * L,
+                F_scale.data() + static_cast<std::size_t>(c1) * L,
                 logP_storage.data() + static_cast<std::size_t>(v) * C * L,
+                P_scale.data() + static_cast<std::size_t>(v) * L,
                 F.data() + static_cast<std::size_t>(v) * C * L,
+                F_scale.data() + static_cast<std::size_t>(v) * L,
                 shared_scratch()
             );
             f_content_version[v] = ++f_content_clock;
@@ -1116,9 +1255,13 @@ struct NNICache {
             ensure_f_valid(sib);
             compute_G_vectorized(
                 G.data() + static_cast<std::size_t>(par) * C * L,
+                G_scale.data() + static_cast<std::size_t>(par) * L,
                 F.data() + static_cast<std::size_t>(sib) * C * L,
+                F_scale.data() + static_cast<std::size_t>(sib) * L,
                 logP_storage.data() + static_cast<std::size_t>(par) * C * L,
+                P_scale.data() + static_cast<std::size_t>(par) * L,
                 G.data() + static_cast<std::size_t>(v) * C * L,
+                G_scale.data() + static_cast<std::size_t>(v) * L,
                 shared_scratch()
             );
             g_content_version[v] = ++g_content_clock;
@@ -1166,11 +1309,12 @@ struct NNICache {
         // Written directly into the fast-staging buffer (not scratch) so
         // commit_fast can apply it without recomputing.
         double* F_p2_new = fast_staged_F_p2.data();
+        int* S_p2_new = fast_staged_S_p2.data();
         compute_F_vectorized(
-            F.data() + c1 * C * L,
-            F.data() + cStay * C * L,
-            logP_storage.data() + p2 * C * L,
-            F_p2_new,
+            F.data() + c1 * C * L, F_scale.data() + static_cast<std::size_t>(c1) * L,
+            F.data() + cStay * C * L, F_scale.data() + static_cast<std::size_t>(cStay) * L,
+            logP_storage.data() + p2 * C * L, P_scale.data() + static_cast<std::size_t>(p2) * L,
+            F_p2_new, S_p2_new,
             scratch
         );
 
@@ -1178,12 +1322,14 @@ struct NNICache {
         // under p1) and p1's own leaf likelihood -- this is the extra
         // combine compute_new_loglik_fast didn't need before staging existed.
         double* F_p1_new = fast_staged_F_p1.data();
+        int* S_p1_new = fast_staged_S_p1.data();
         const double* P_p1 = logP_storage.data() + p1 * C * L;
+        const int* P_p1_sc = P_scale.data() + static_cast<std::size_t>(p1) * L;
         compute_F_vectorized(
-            F_p2_new,
-            F.data() + cX * C * L,
-            P_p1,
-            F_p1_new,
+            F_p2_new, S_p2_new,
+            F.data() + cX * C * L, F_scale.data() + static_cast<std::size_t>(cX) * L,
+            P_p1, P_p1_sc,
+            F_p1_new, S_p1_new,
             scratch
         );
 
@@ -1194,17 +1340,27 @@ struct NNICache {
         // p1's own leaf likelihood combined with its (unchanged) outside
         // message -- reuse the childF scratch slot as the combine buffer
         // (F_p2/F_p1 scratch slots are free here since we wrote directly
-        // into the fast_staged_* buffers above instead).
+        // into the fast_staged_* buffers above instead). Linear now, so this
+        // is a product rather than a sum, with the exponents added.
         double* Pg = scratch.childF;
+        int* Pg_sc = scratch.S_childF;
         const double* G_p1 = G.data() + p1 * C * L;
-        const std::size_t block = static_cast<std::size_t>(C) * L;
-        for (std::size_t idx = 0; idx < block; ++idx) Pg[idx] = P_p1[idx] + G_p1[idx];
+        const int* G_p1_sc = G_scale.data() + static_cast<std::size_t>(p1) * L;
+        // Routed through form_triple_product (with the ones identity as the
+        // third factor) rather than a bare elementwise multiply, so this
+        // product gets the same underflow guard as every other one.
+        form_triple_product(P_p1, G_p1, ones_CL.data(), Pg, scratch.exp_extra);
+        for (int l = 0; l < L; ++l) Pg_sc[l] = P_p1_sc[l] + G_p1_sc[l] + scratch.exp_extra[l];
 
         // Same identity compute_root_logZ_vectorized already implements for
         // the root special case: logsumexp_c(P_base[c] + F_a[c] + F_b[c]),
         // summed over loci. Pg stands in for the root's P, F[cX] is the
         // other branch into p1 that this NNI leaves untouched.
-        return compute_root_logZ_vectorized(F_p2_new, F.data() + cX * C * L, Pg, scratch);
+        return compute_root_logZ_vectorized(
+            F_p2_new, S_p2_new,
+            F.data() + cX * C * L, F_scale.data() + static_cast<std::size_t>(cX) * L,
+            Pg, Pg_sc,
+            scratch);
     }
 
     // Apply a proposal previously evaluated (and staged) by
@@ -1236,6 +1392,8 @@ struct NNICache {
         // holds before that update runs.
         std::copy(fast_staged_F_p2.begin(), fast_staged_F_p2.end(), F.data() + static_cast<std::size_t>(p2) * block);
         std::copy(fast_staged_F_p1.begin(), fast_staged_F_p1.end(), F.data() + static_cast<std::size_t>(p1) * block);
+        std::copy(fast_staged_S_p2.begin(), fast_staged_S_p2.end(), F_scale.data() + static_cast<std::size_t>(p2) * L);
+        std::copy(fast_staged_S_p1.begin(), fast_staged_S_p1.end(), F_scale.data() + static_cast<std::size_t>(p1) * L);
 
         auto &ch1 = children_of[p1];
         if (ch1[0] == c1) ch1[0] = cX; else ch1[1] = cX;
@@ -1325,30 +1483,32 @@ struct NNICache {
 
         double* scratch_F_p2_ptr = scratch.F_p2;
         double* scratch_F_p1_ptr = scratch.F_p1;
+        int* scratch_S_p2_ptr = scratch.S_p2;
+        int* scratch_S_p1_ptr = scratch.S_p1;
 
         compute_F_vectorized(
-            F.data() + c1 * C * L,
-            F.data() + cStay * C * L,
-            logP_storage.data() + p2 * C * L,
-            scratch_F_p2_ptr,
+            F.data() + c1 * C * L, F_scale.data() + static_cast<std::size_t>(c1) * L,
+            F.data() + cStay * C * L, F_scale.data() + static_cast<std::size_t>(cStay) * L,
+            logP_storage.data() + p2 * C * L, P_scale.data() + static_cast<std::size_t>(p2) * L,
+            scratch_F_p2_ptr, scratch_S_p2_ptr,
             scratch
         );
-        if (stage_results) stage_node_F(p2, scratch_F_p2_ptr);
+        if (stage_results) stage_node_F(p2, scratch_F_p2_ptr, scratch_S_p2_ptr);
 
         compute_F_vectorized(
-            scratch_F_p2_ptr,
-            F.data() + cX * C * L,
-            logP_storage.data() + p1 * C * L,
-            scratch_F_p1_ptr,
+            scratch_F_p2_ptr, scratch_S_p2_ptr,
+            F.data() + cX * C * L, F_scale.data() + static_cast<std::size_t>(cX) * L,
+            logP_storage.data() + p1 * C * L, P_scale.data() + static_cast<std::size_t>(p1) * L,
+            scratch_F_p1_ptr, scratch_S_p1_ptr,
             scratch
         );
-        if (stage_results) stage_node_F(p1, scratch_F_p1_ptr);
+        if (stage_results) stage_node_F(p1, scratch_F_p1_ptr, scratch_S_p1_ptr);
 
         if (parent_of[p1] == -1) {
             double new_total = compute_root_logZ_vectorized(
-                scratch_F_p2_ptr,
-                F.data() + cX * C * L,
-                logP_storage.data() + p1 * C * L,
+                scratch_F_p2_ptr, scratch_S_p2_ptr,
+                F.data() + cX * C * L, F_scale.data() + static_cast<std::size_t>(cX) * L,
+                logP_storage.data() + p1 * C * L, P_scale.data() + static_cast<std::size_t>(p1) * L,
                 scratch
             );
             if (stage_results) {
@@ -1362,8 +1522,12 @@ struct NNICache {
         double* p_childF = scratch.childF;
         double* p_prev_childF = scratch.prev_childF;
         double* p_F_v = scratch.F_v;
+        int* p_childS = scratch.S_childF;
+        int* p_prev_childS = scratch.S_prev_childF;
+        int* p_S_v = scratch.S_F_v;
 
         std::copy(scratch_F_p1_ptr, scratch_F_p1_ptr + CL, p_childF);
+        std::copy(scratch_S_p1_ptr, scratch_S_p1_ptr + L, p_childS);
 
         int prev_child = -1;
 
@@ -1373,9 +1537,9 @@ struct NNICache {
                 const int root_node = child;
                 const int sib = other_child(root_node, prev_child);
                 double new_total = compute_root_logZ_vectorized(
-                    p_prev_childF,
-                    F.data() + sib * C * L,
-                    logP_storage.data() + root_node * C * L,
+                    p_prev_childF, p_prev_childS,
+                    F.data() + sib * C * L, F_scale.data() + static_cast<std::size_t>(sib) * L,
+                    logP_storage.data() + root_node * C * L, P_scale.data() + static_cast<std::size_t>(root_node) * L,
                     scratch
                 );
                 if (stage_results) {
@@ -1387,19 +1551,23 @@ struct NNICache {
 
             const int sib = other_child(v, child);
             compute_F_vectorized(
-                p_childF,
-                F.data() + sib * C * L,
-                logP_storage.data() + v * C * L,
-                p_F_v,
+                p_childF, p_childS,
+                F.data() + sib * C * L, F_scale.data() + static_cast<std::size_t>(sib) * L,
+                logP_storage.data() + v * C * L, P_scale.data() + static_cast<std::size_t>(v) * L,
+                p_F_v, p_S_v,
                 scratch
             );
-            if (stage_results) stage_node_F(v, p_F_v);
+            if (stage_results) stage_node_F(v, p_F_v, p_S_v);
 
             prev_child = child;
             double* temp = p_prev_childF;
             p_prev_childF = p_childF;
             p_childF = p_F_v;
             p_F_v = temp;
+            int* temp_s = p_prev_childS;
+            p_prev_childS = p_childS;
+            p_childS = p_S_v;
+            p_S_v = temp_s;
             child = v;
         }
     }
@@ -1438,11 +1606,15 @@ struct NNICache {
         const std::size_t block = CL;
         double* F_ptr = F.data();
         const double* staged_ptr = staged_F.data();
+        const int* staged_s_ptr = staged_S.data();
         for (std::size_t idx = 0; idx < staged_nodes.size(); ++idx) {
             const int node_id = staged_nodes[idx];
             double* dest = F_ptr + static_cast<std::size_t>(node_id) * block;
             std::copy(staged_ptr, staged_ptr + block, dest);
             staged_ptr += block;
+            std::copy(staged_s_ptr, staged_s_ptr + L,
+                      F_scale.data() + static_cast<std::size_t>(node_id) * L);
+            staged_s_ptr += L;
         }
         current_total_loglik_val = staged_total_loglik;
 
@@ -1540,6 +1712,7 @@ struct NNICache {
         for (int v = 0; v < n; ++v) ensure_f_valid(v);
 
         std::vector<double> ground_truth(static_cast<std::size_t>(n) * C * L, 0.0);
+        std::vector<int> ground_truth_scale(static_cast<std::size_t>(n) * L, 0);
         // Postorder: process children before parents. Reuse a simple stack-based
         // postorder over the current topology.
         std::vector<int> order;
@@ -1563,26 +1736,44 @@ struct NNICache {
                 std::copy(F.data() + static_cast<std::size_t>(v) * C * L,
                           F.data() + static_cast<std::size_t>(v) * C * L + C * L,
                           ground_truth.data() + static_cast<std::size_t>(v) * C * L);
+                std::copy(F_scale.data() + static_cast<std::size_t>(v) * L,
+                          F_scale.data() + static_cast<std::size_t>(v) * L + L,
+                          ground_truth_scale.data() + static_cast<std::size_t>(v) * L);
                 continue;
             }
             const int c0 = children_of[v][0];
             const int c1v = children_of[v][1];
             compute_F_vectorized(
                 ground_truth.data() + static_cast<std::size_t>(c0) * C * L,
+                ground_truth_scale.data() + static_cast<std::size_t>(c0) * L,
                 ground_truth.data() + static_cast<std::size_t>(c1v) * C * L,
+                ground_truth_scale.data() + static_cast<std::size_t>(c1v) * L,
                 logP_storage.data() + static_cast<std::size_t>(v) * C * L,
+                P_scale.data() + static_cast<std::size_t>(v) * L,
                 ground_truth.data() + static_cast<std::size_t>(v) * C * L,
+                ground_truth_scale.data() + static_cast<std::size_t>(v) * L,
                 scratch
             );
         }
+        // Compare in log space so the tolerance keeps its original meaning
+        // (log-likelihood units) now that the cache itself is scaled-linear.
         for (int v = 0; v < n; ++v) {
             if (v == root) continue; // F[root] is intentionally never set/used
             const double* a = F.data() + static_cast<std::size_t>(v) * C * L;
             const double* b = ground_truth.data() + static_cast<std::size_t>(v) * C * L;
-            for (int idx = 0; idx < C * L; ++idx) {
-                const double av = a[idx], bv = b[idx];
-                const bool both_inf = !std::isfinite(av) && !std::isfinite(bv);
-                if (!both_inf && std::abs(av - bv) > tol) return v;
+            const int* as = F_scale.data() + static_cast<std::size_t>(v) * L;
+            const int* bs = ground_truth_scale.data() + static_cast<std::size_t>(v) * L;
+            for (int c = 0; c < C; ++c) {
+                for (int l = 0; l < L; ++l) {
+                    const std::size_t idx = static_cast<std::size_t>(c) * L + l;
+                    const double av = a[idx], bv = b[idx];
+                    const bool both_zero = !(av > 0.0) && !(bv > 0.0);
+                    if (both_zero) continue;
+                    if (!(av > 0.0) || !(bv > 0.0)) return v;
+                    const double la = std::log(av) + as[l] * M_LN2;
+                    const double lb = std::log(bv) + bs[l] * M_LN2;
+                    if (std::abs(la - lb) > tol) return v;
+                }
             }
         }
         return -1;
