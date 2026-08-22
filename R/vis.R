@@ -10,9 +10,13 @@
 #' @param min_cells Integer minimum number of cells with VAF > 0 required to keep a variant.
 #' @param tip_annot Optional data frame of tip annotations with columns `cell` and `annot`.
 #' @param annot_scale Optional ggplot scale for annotation colors.
-#' @param feature_mat Optional matrix of features (rows = features, columns = cells) to plot as a heatmap.
+#' @param feature_mat Optional matrix of features (rows = features, columns = cells) to plot as a
+#'   heatmap, or a *list* of such matrices to draw as separate stacked heatmap panels (e.g. one
+#'   panel per level of a grouping). A single matrix behaves exactly as before.
 #' @param feature_limits Numeric vector of length 2 giving limits for feature heatmap color scale.
-#' @param feature_scale Optional ggplot scale for feature heatmap colors.
+#' @param feature_scale Optional ggplot scale for feature heatmap colors. When `feature_mat` is a
+#'   list, either one scale (recycled across panels, so they share a colour mapping) or a list of
+#'   scales, one per panel.
 #' @param rescale Logical; if `TRUE`, z-score features per row before plotting.
 #' @param title Optional plot title.
 #' @param ytitle Optional VAF heatmap y-axis title.
@@ -24,7 +28,8 @@
 #' @param layered Logical; if `TRUE`, render annotation bars as layered tiles.
 #' @param annot_bar_height Numeric height for each annotation bar panel.
 #' @param clade_bar_height Numeric height for clade bar panel (unused in current implementation).
-#' @param feature_height Numeric height for the feature heatmap panel.
+#' @param feature_height Numeric height for the feature heatmap panel; when `feature_mat` is a list,
+#'   either one value (recycled) or one per panel.
 #' @param het_max Numeric maximum VAF for heatmap color scaling.
 #' @param conf_min Numeric minimum value for confidence color scale.
 #' @param conf_max Numeric maximum value for confidence color scale.
@@ -298,43 +303,66 @@ plot_phylo_heatmap2 = function(phylo, df_var = NULL, branch_width = 0.25, root_e
 
     if (!is.null(feature_mat)) {
 
-        df_feature = feature_mat %>%
-            as.data.frame() %>%
-            tibble::rownames_to_column('feature') %>%
-            mutate(feature = factor(feature, rev(rownames(feature_mat)))) %>%
-            reshape2::melt(id.vars = 'feature', variable.name = 'cell', value.name = 'value') %>%
-            mutate(cell = factor(cell, cell_order))
-        
-        if (rescale) {
-            df_feature = df_feature %>%
-                group_by(feature) %>%
-                mutate(value = as.vector(scale(value))) %>%
-                ungroup()
+        # Accept either a single matrix or a list of matrices (drawn as separate stacked panels).
+        # Mirrors how `cell_annot` is handled above. A bare matrix is not a list, but a data.frame
+        # is, hence the second test.
+        if (!is.list(feature_mat) || is.data.frame(feature_mat)) {
+            feature_mat <- list(feature_mat)
         }
-
-        p_feature = df_feature %>%
-            ggplot(aes(x = cell, y = feature, fill = value)) +
-            geom_raster(show.legend = feature_legend) +
-            theme_bw() +
-            theme(axis.text.x = element_blank(), 
-                axis.text.y = element_text(size = text_size),
-                plot.margin = margin(t = 1, r = 0, b = 1, l = 0, unit = "mm"),
-                axis.ticks.x = element_blank(),
-                axis.title.x = element_blank(),
-                axis.title.y = element_blank(),
-            ) +
-            scale_x_discrete(expand = expansion(add = 1), drop = F) +
-            scale_y_discrete(expand = expansion(add = 0))
+        n_feat <- length(feature_mat)
 
         if (is.null(feature_scale)) {
-            p_feature = p_feature + scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', limits = feature_limits, oob = scales::oob_squish)
+            feature_scale_list <- rep(list(NULL), n_feat)
+        } else if (inherits(feature_scale, "Scale") || !is.list(feature_scale)) {
+            feature_scale_list <- rep(list(feature_scale), n_feat)   # one scale shared by all panels
         } else {
-            p_feature = p_feature + feature_scale
+            feature_scale_list <- feature_scale
         }
+        feature_height_vec <- rep_len(feature_height, n_feat)
 
-        if (raster) {
-            p_feature = ggrastr::rasterize(p_feature, dpi = raster_dpi, layers = 'Raster')
-        }
+        p_feature_list <- lapply(seq_len(n_feat), function(fi) {
+
+            fm <- feature_mat[[fi]]
+
+            df_feature = fm %>%
+                as.data.frame() %>%
+                tibble::rownames_to_column('feature') %>%
+                mutate(feature = factor(feature, rev(rownames(fm)))) %>%
+                reshape2::melt(id.vars = 'feature', variable.name = 'cell', value.name = 'value') %>%
+                mutate(cell = factor(cell, cell_order))
+
+            if (rescale) {
+                df_feature = df_feature %>%
+                    group_by(feature) %>%
+                    mutate(value = as.vector(scale(value))) %>%
+                    ungroup()
+            }
+
+            p_feature = df_feature %>%
+                ggplot(aes(x = cell, y = feature, fill = value)) +
+                geom_raster(show.legend = feature_legend) +
+                theme_bw() +
+                theme(axis.text.x = element_blank(),
+                    axis.text.y = element_text(size = text_size),
+                    plot.margin = margin(t = 1, r = 0, b = 1, l = 0, unit = "mm"),
+                    axis.ticks.x = element_blank(),
+                    axis.title.x = element_blank(),
+                    axis.title.y = element_blank(),
+                ) +
+                scale_x_discrete(expand = expansion(add = 1), drop = F) +
+                scale_y_discrete(expand = expansion(add = 0))
+
+            if (is.null(feature_scale_list[[fi]])) {
+                p_feature = p_feature + scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', limits = feature_limits, oob = scales::oob_squish)
+            } else {
+                p_feature = p_feature + feature_scale_list[[fi]]
+            }
+
+            if (raster) {
+                p_feature = ggrastr::rasterize(p_feature, dpi = raster_dpi, layers = 'Raster')
+            }
+            p_feature
+        })
     }
 
     # Determine heights based on components
@@ -349,8 +377,8 @@ plot_phylo_heatmap2 = function(phylo, df_var = NULL, branch_width = 0.25, root_e
     }
     
     if (!is.null(feature_mat)) {
-        plot_components <- c(plot_components, list(p_feature))
-        heights <- c(heights, feature_height)
+        plot_components <- c(plot_components, p_feature_list)
+        heights <- c(heights, feature_height_vec)
     }
     
     if (!is.null(p_heatmap)) {

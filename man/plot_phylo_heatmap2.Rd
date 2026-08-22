@@ -74,11 +74,15 @@ or \code{a}/\code{d} for computing VAF.}
 
 \item{annot_scale}{Optional ggplot scale for annotation colors.}
 
-\item{feature_mat}{Optional matrix of features (rows = features, columns = cells) to plot as a heatmap.}
+\item{feature_mat}{Optional matrix of features (rows = features, columns = cells) to plot as a
+heatmap, or a \emph{list} of such matrices to draw as separate stacked heatmap panels (e.g. one
+panel per level of a grouping). A single matrix behaves exactly as before.}
 
 \item{feature_limits}{Numeric vector of length 2 giving limits for feature heatmap color scale.}
 
-\item{feature_scale}{Optional ggplot scale for feature heatmap colors.}
+\item{feature_scale}{Optional ggplot scale for feature heatmap colors. When \code{feature_mat} is a
+list, either one scale (recycled across panels, so they share a colour mapping) or a list of
+scales, one per panel.}
 
 \item{rescale}{Logical; if \code{TRUE}, z-score features per row before plotting.}
 
@@ -102,7 +106,8 @@ or \code{a}/\code{d} for computing VAF.}
 
 \item{clade_bar_height}{Numeric height for clade bar panel (unused in current implementation).}
 
-\item{feature_height}{Numeric height for the feature heatmap panel.}
+\item{feature_height}{Numeric height for the feature heatmap panel; when \code{feature_mat} is a list,
+either one value (recycled) or one per panel.}
 
 \item{het_max}{Numeric maximum VAF for heatmap color scaling.}
 
