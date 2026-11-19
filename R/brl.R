@@ -304,7 +304,7 @@ run_brl_hmc <- function(phy, logliks, k, npop, eps, ngen_ref, htotal, n_warmup =
     th <- c(log(x0 / (1 - x0)), log(H0)); cur <- logpost_grad(th)
     minv <- rep(1, np + 1)                                   # inverse mass (variances)
     # step size: find a reasonable start, then dual averaging during warm-up
-    eps_s <- 0.01; mu <- log(10 * eps_s); Hbar <- 0; logeps_bar <- 0; gamma <- 0.05; t0da <- 10; kap <- 0.75
+    eps_s <- 0.01; mu <- log(10 * eps_s); Hbar <- 0; logeps_bar <- 0; gamma <- 0.05; t0da <- 10; kap <- 0.75; da_start <- 0L
     n_tot <- n_warmup + n_sample; keep_rows <- (n_warmup + 1):n_tot
     trace <- matrix(NA_real_, n_sample, np); root_tr <- numeric(n_sample); ll_tr <- numeric(n_sample); acc_tr <- numeric(n_sample)
     warm_store <- matrix(NA_real_, 0, np + 1); win <- c(floor(0.3 * n_warmup), floor(0.85 * n_warmup))
@@ -321,12 +321,12 @@ run_brl_hmc <- function(phy, logliks, k, npop, eps, ngen_ref, htotal, n_warmup =
         a <- min(1, exp(logacc)); if (!is.finite(a)) a <- 0
         if (runif(1) < a) { th <- th1; cur <- nw }
         if (it <= n_warmup) {
-            m <- it; Hbar <- (1 - 1 / (m + t0da)) * Hbar + (delta - a) / (m + t0da)
+            m <- it - da_start; Hbar <- (1 - 1 / (m + t0da)) * Hbar + (delta - a) / (m + t0da)
             logeps <- mu - sqrt(m) / gamma * Hbar; eta <- m^(-kap); logeps_bar <- eta * logeps + (1 - eta) * logeps_bar
             eps_s <- exp(logeps)
             if (it > win[1] && it <= win[2]) warm_store <- rbind(warm_store, th)
             if (it == win[2] && nrow(warm_store) > 20) {        # diagonal mass matrix, then restart step-size adaptation
-                minv <- pmax(apply(warm_store, 2, var), 1e-6); mu <- log(10 * eps_s); Hbar <- 0; logeps_bar <- 0
+                minv <- pmax(apply(warm_store, 2, var), 1e-6); mu <- log(10 * eps_s); Hbar <- 0; logeps_bar <- 0; da_start <- it
             }
             if (it == n_warmup) eps_s <- exp(logeps_bar)
         } else {
