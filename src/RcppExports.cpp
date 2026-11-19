@@ -27,8 +27,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // tree_brl_mcmc_cpp
-List tree_brl_mcmc_cpp(arma::Col<int> E, const std::vector<std::vector<double>>& logP_list, const std::vector<std::vector<double>>& A_grid, const std::vector<double>& grid, std::vector<double> heights_init, int n_iter, double step_sd, int thin, int seed, int refresh);
-RcppExport SEXP _mitodrift_tree_brl_mcmc_cpp(SEXP ESEXP, SEXP logP_listSEXP, SEXP A_gridSEXP, SEXP gridSEXP, SEXP heights_initSEXP, SEXP n_iterSEXP, SEXP step_sdSEXP, SEXP thinSEXP, SEXP seedSEXP, SEXP refreshSEXP) {
+List tree_brl_mcmc_cpp(arma::Col<int> E, const std::vector<std::vector<double>>& logP_list, const std::vector<std::vector<double>>& A_grid, const std::vector<double>& grid, std::vector<double> heights_init, int n_iter, double step_sd, int thin, int seed, int refresh, double p_scale, double scale_sd);
+RcppExport SEXP _mitodrift_tree_brl_mcmc_cpp(SEXP ESEXP, SEXP logP_listSEXP, SEXP A_gridSEXP, SEXP gridSEXP, SEXP heights_initSEXP, SEXP n_iterSEXP, SEXP step_sdSEXP, SEXP thinSEXP, SEXP seedSEXP, SEXP refreshSEXP, SEXP p_scaleSEXP, SEXP scale_sdSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -42,7 +42,45 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type thin(thinSEXP);
     Rcpp::traits::input_parameter< int >::type seed(seedSEXP);
     Rcpp::traits::input_parameter< int >::type refresh(refreshSEXP);
-    rcpp_result_gen = Rcpp::wrap(tree_brl_mcmc_cpp(E, logP_list, A_grid, grid, heights_init, n_iter, step_sd, thin, seed, refresh));
+    Rcpp::traits::input_parameter< double >::type p_scale(p_scaleSEXP);
+    Rcpp::traits::input_parameter< double >::type scale_sd(scale_sdSEXP);
+    rcpp_result_gen = Rcpp::wrap(tree_brl_mcmc_cpp(E, logP_list, A_grid, grid, heights_init, n_iter, step_sd, thin, seed, refresh, p_scale, scale_sd));
+    return rcpp_result_gen;
+END_RCPP
+}
+// tree_brl_optimize_cpp
+List tree_brl_optimize_cpp(arma::Col<int> E, const std::vector<std::vector<double>>& logP_list, const std::vector<std::vector<double>>& A_grid, const std::vector<double>& grid, std::vector<double> heights_init, int max_sweeps, double tol_ll, bool optimize_root, double max_factor, int golden_iter);
+RcppExport SEXP _mitodrift_tree_brl_optimize_cpp(SEXP ESEXP, SEXP logP_listSEXP, SEXP A_gridSEXP, SEXP gridSEXP, SEXP heights_initSEXP, SEXP max_sweepsSEXP, SEXP tol_llSEXP, SEXP optimize_rootSEXP, SEXP max_factorSEXP, SEXP golden_iterSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< arma::Col<int> >::type E(ESEXP);
+    Rcpp::traits::input_parameter< const std::vector<std::vector<double>>& >::type logP_list(logP_listSEXP);
+    Rcpp::traits::input_parameter< const std::vector<std::vector<double>>& >::type A_grid(A_gridSEXP);
+    Rcpp::traits::input_parameter< const std::vector<double>& >::type grid(gridSEXP);
+    Rcpp::traits::input_parameter< std::vector<double> >::type heights_init(heights_initSEXP);
+    Rcpp::traits::input_parameter< int >::type max_sweeps(max_sweepsSEXP);
+    Rcpp::traits::input_parameter< double >::type tol_ll(tol_llSEXP);
+    Rcpp::traits::input_parameter< bool >::type optimize_root(optimize_rootSEXP);
+    Rcpp::traits::input_parameter< double >::type max_factor(max_factorSEXP);
+    Rcpp::traits::input_parameter< int >::type golden_iter(golden_iterSEXP);
+    rcpp_result_gen = Rcpp::wrap(tree_brl_optimize_cpp(E, logP_list, A_grid, grid, heights_init, max_sweeps, tol_ll, optimize_root, max_factor, golden_iter));
+    return rcpp_result_gen;
+END_RCPP
+}
+// brl_grad_heights_cpp
+List brl_grad_heights_cpp(arma::Col<int> E, const std::vector<std::vector<double>>& logP_list, const std::vector<std::vector<double>>& A_grid, const std::vector<double>& grid, std::vector<double> heights, double rel_step);
+RcppExport SEXP _mitodrift_brl_grad_heights_cpp(SEXP ESEXP, SEXP logP_listSEXP, SEXP A_gridSEXP, SEXP gridSEXP, SEXP heightsSEXP, SEXP rel_stepSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< arma::Col<int> >::type E(ESEXP);
+    Rcpp::traits::input_parameter< const std::vector<std::vector<double>>& >::type logP_list(logP_listSEXP);
+    Rcpp::traits::input_parameter< const std::vector<std::vector<double>>& >::type A_grid(A_gridSEXP);
+    Rcpp::traits::input_parameter< const std::vector<double>& >::type grid(gridSEXP);
+    Rcpp::traits::input_parameter< std::vector<double> >::type heights(heightsSEXP);
+    Rcpp::traits::input_parameter< double >::type rel_step(rel_stepSEXP);
+    rcpp_result_gen = Rcpp::wrap(brl_grad_heights_cpp(E, logP_list, A_grid, grid, heights, rel_step));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -341,7 +379,9 @@ END_RCPP
 
 static const R_CallMethodDef CallEntries[] = {
     {"_mitodrift_score_tree_brl_cpp", (DL_FUNC) &_mitodrift_score_tree_brl_cpp, 5},
-    {"_mitodrift_tree_brl_mcmc_cpp", (DL_FUNC) &_mitodrift_tree_brl_mcmc_cpp, 10},
+    {"_mitodrift_tree_brl_mcmc_cpp", (DL_FUNC) &_mitodrift_tree_brl_mcmc_cpp, 12},
+    {"_mitodrift_tree_brl_optimize_cpp", (DL_FUNC) &_mitodrift_tree_brl_optimize_cpp, 10},
+    {"_mitodrift_brl_grad_heights_cpp", (DL_FUNC) &_mitodrift_brl_grad_heights_cpp, 6},
     {"_mitodrift_prop_clades_par", (DL_FUNC) &_mitodrift_prop_clades_par, 4},
     {"_mitodrift_compute_node_edge_stats_bp2", (DL_FUNC) &_mitodrift_compute_node_edge_stats_bp2, 3},
     {"_mitodrift_get_leaf_liks_mat_cpp", (DL_FUNC) &_mitodrift_get_leaf_liks_mat_cpp, 8},

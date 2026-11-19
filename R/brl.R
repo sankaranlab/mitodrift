@@ -5,7 +5,7 @@
 # scales with edge length: the package's per-edge eps (fitted for an edge of `ngen_ref` generations) is converted
 # to a per-generation rate, so an edge of t generations uses eps_t = 1 - (1 - eps_gen)^t and a zero-length edge
 # creates no new variant. The C++ sampler (src/brl.cpp) updates only the edges at the moved node and the messages
-# on its path to the root.
+# on its path to the root. The root height is sampled by a global scaling move (all heights x c; 1/H prior).
 
 #' Transition-matrix grid for branch-length inference
 #'
@@ -95,7 +95,7 @@ score_tree_brl <- function(phy, logliks, grid_obj, heights = NULL, ncores = 1) {
 #' @param phy Rooted `phylo` (topology used; polytomies allowed).
 #' @param logliks Leaf log-likelihoods (`md$leaf_likelihoods`), named by variant, columns = cells.
 #' @param k,npop,eps,ngen_ref Model parameters (`md$model_params`: k, npop, eps, ngen).
-#' @param htotal Root height in generations (fixed).
+#' @param htotal Starting root height in generations (fixed if `sample_root = FALSE`).
 #' @param n_iter Iterations (one node move each).
 #' @param grid Generation grid for the transition matrices (default: 0 to `htotal`, about 100 points).
 #' @param heights_init Starting heights (default: Grafen-style).
@@ -105,29 +105,43 @@ score_tree_brl <- function(phy, logliks, grid_obj, heights = NULL, ncores = 1) {
 #' @param seed RNG seed.
 #' @param ncores Threads (parallel over variants).
 #' @param refresh Full likelihood recomputation every `refresh` iterations.
-#' @return A list: `trace` (kept heights, one column per internal non-root node), `logL`, `acceptance`,
-#'   `heights_mean` (posterior mean, all nodes), `phy_mean` (`phy` with branch lengths from the posterior mean),
-#'   `logL_check` (incremental vs full recomputation at the end), `grid_obj`.
+#' @param sample_root Sample the root height (global scaling move, 1/H prior); default TRUE.
+#' @param p_scale,scale_sd Probability of a scaling move per iteration and sd of its log scale factor.
+#' @param hmax_factor Grid (and root height) upper bound as a multiple of `htotal`.
+#' @return A list: `trace` (kept heights in generations, one column per internal non-root node), `trace_rel` (the same
+#'   divided by each sample's root height), `root_height`, `logL`, `acceptance`, `heights_rel_mean` (posterior mean
+#'   relative heights, all nodes), `root_height_mean`, `heights_mean` (relative mean x root mean), `phy_mean`,
+#'   `logL_check` (incremental vs full recomputation at the end), `grid_obj`, `keep` (post-burn-in rows).
 #' @export
 run_brl_mcmc <- function(phy, logliks, k, npop, eps, ngen_ref, htotal, n_iter = 10000, grid = NULL,
                          heights_init = NULL, step_sd = 1, thin = 10, burnin = 0.25, seed = 1, ncores = 1,
-                         refresh = 1000) {
+                         refresh = 1000, sample_root = TRUE, p_scale = 0.02, scale_sd = 0.15, hmax_factor = 50) {
     RcppParallel::setThreadOptions(numThreads = ncores)
-    if (is.null(grid)) grid <- unique(round(seq(0, ceiling(htotal), length.out = 101)))
+    if (is.null(grid)) {
+        hmax <- if (sample_root) ceiling(htotal * hmax_factor) else ceiling(htotal)
+        # integer generations, dense near 0 (short edges) and log-spaced above, so any root height up to hmax is covered
+        grid <- sort(unique(c(0:min(30, hmax), round(exp(seq(log(min(31, hmax)), log(hmax), length.out = 90))))))
+    }
     grid_obj <- brl_transition_grid(k = k, npop = npop, eps = eps, ngen_ref = ngen_ref, grid = grid)
     s <- brl_setup(phy, logliks)
     if (is.null(heights_init)) heights_init <- brl_init_heights(s$phy, htotal)
     res <- tree_brl_mcmc_cpp(s$E, s$logP, grid_obj$A, grid_obj$grid, as.numeric(heights_init), n_iter = n_iter,
-                             step_sd = step_sd, thin = thin, seed = seed, refresh = refresh)
+                             step_sd = step_sd, thin = thin, seed = seed, refresh = refresh,
+                             p_scale = if (sample_root) p_scale else 0, scale_sd = scale_sd)
     keep <- seq_len(nrow(res$heights)); keep <- keep[keep > floor(burnin * length(keep))]
-    hm <- as.numeric(heights_init)
-    hm[res$nodes] <- colMeans(res$heights[keep, , drop = FALSE])
-    phy_mean <- s$phy; phy_mean$edge.length <- hm[phy_mean$edge[, 1]] - hm[phy_mean$edge[, 2]]
     colnames(res$heights) <- res$nodes
-    list(trace = res$heights, logL = res$logL, accepted = res$accepted, acceptance = res$acceptance,
-         nodes = res$nodes, heights_mean = hm, heights_final = res$heights_final, phy_mean = phy_mean,
-         logL_check = c(incremental = res$logL_incremental, full = res$logL_full), grid_obj = grid_obj,
-         htotal = htotal)
+    rel <- res$heights / res$root_height                     # heights relative to each sample's root height
+    root <- nt_root <- length(s$phy$tip.label) + 1
+    H_mean <- mean(res$root_height[keep])
+    hrel <- c(rep(0, length(s$phy$tip.label)), rep(NA, s$phy$Nnode)); hrel[root] <- 1
+    hrel[res$nodes] <- colMeans(rel[keep, , drop = FALSE])
+    hm <- hrel * H_mean                                      # posterior mean shape at the posterior mean root height
+    phy_mean <- s$phy; phy_mean$edge.length <- hm[phy_mean$edge[, 1]] - hm[phy_mean$edge[, 2]]
+    list(trace = res$heights, trace_rel = rel, root_height = res$root_height, logL = res$logL, accepted = res$accepted,
+         acceptance = res$acceptance, scale_acceptance = res$scale_acceptance, nodes = res$nodes,
+         heights_mean = hm, heights_rel_mean = hrel, root_height_mean = H_mean, heights_final = res$heights_final,
+         phy_mean = phy_mean, logL_check = c(incremental = res$logL_incremental, full = res$logL_full),
+         grid_obj = grid_obj, htotal_init = htotal, keep = keep)
 }
 
 #' Branch-length MCMC from a fitted MitoDrift object
@@ -149,4 +163,81 @@ md_brl_mcmc <- function(md, phy = NULL, htotal = NULL, ...) {
     }
     run_brl_mcmc(phy, md$leaf_likelihoods, k = unname(p["k"]), npop = unname(p["npop"]), eps = unname(p["eps"]),
                  ngen_ref = unname(p["ngen"]), htotal = htotal, ...)
+}
+
+
+#' Maximum-likelihood node heights on a fixed topology
+#'
+#' `method = "joint"` (default): all node positions and the root height are optimised together by L-BFGS-B, in the
+#' top-down parameterisation of the original `x_to_length()`: a node's depth from the root is
+#' `d_v = d_parent + (H - d_parent) * x_v`, `x_v = sigmoid(p_v)`, so moving a node carries its subtree and every
+#' parameter vector is a valid ultrametric tree. The likelihood is a full C++ pass; the gradient comes from
+#' incremental central differences in each node height ([brl_grad_heights_cpp]), chained analytically into `p`, plus
+#' a central difference in log H. `method = "coordinate"`: per-node golden-section sweeps (as the original
+#' `estimate_brl_iter()`), each node moving between its highest child and its parent.
+#'
+#' @inheritParams run_brl_mcmc
+#' @param method "joint" or "coordinate".
+#' @param optimize_root Also optimise the root height.
+#' @param max_sweeps,tol_ll Stopping rule for "coordinate"; `maxit` for "joint".
+#' @return A list: `heights` (generations, indexed by node), `heights_rel` (root = 1), `root_height`, `logL`, `phy`
+#'   (with ML branch lengths), `convergence` (optim code for "joint"), `n_eval`.
+#' @export
+optimize_brl <- function(phy, logliks, k, npop, eps, ngen_ref, htotal, grid = NULL, heights_init = NULL,
+                         method = c("joint", "coordinate"), optimize_root = TRUE, max_sweeps = 50, tol_ll = 0.01,
+                         maxit = 500, hmax_factor = 50, ncores = 1) {
+    method <- match.arg(method)
+    RcppParallel::setThreadOptions(numThreads = ncores)
+    if (is.null(grid)) {
+        hmax <- if (optimize_root) ceiling(htotal * hmax_factor) else ceiling(htotal)
+        grid <- sort(unique(c(0:min(30, hmax), round(exp(seq(log(min(31, hmax)), log(hmax), length.out = 90))))))
+    }
+    grid_obj <- brl_transition_grid(k = k, npop = npop, eps = eps, ngen_ref = ngen_ref, grid = grid)
+    s <- brl_setup(phy, logliks)
+    if (is.null(heights_init)) heights_init <- brl_init_heights(s$phy, htotal)
+    nt <- length(s$phy$tip.label); root <- nt + 1L
+    if (method == "coordinate") {
+        r <- tree_brl_optimize_cpp(s$E, s$logP, grid_obj$A, grid_obj$grid, as.numeric(heights_init), max_sweeps = max_sweeps,
+                                   tol_ll = tol_ll, optimize_root = optimize_root, max_factor = hmax_factor)
+        h <- r$heights; conv <- NA_integer_; n_eval <- r$sweeps; ll <- r$logL
+    } else {
+        Ec <- ape::reorder.phylo(s$phy, "cladewise")$edge          # parents before children
+        par_of <- integer(nt + s$phy$Nnode); par_of[Ec[, 2]] <- Ec[, 1]
+        inner <- Ec[Ec[, 2] > nt, 2]                                # internal non-root nodes, top-down
+        inner_po <- rev(inner)                                      # bottom-up
+        kids <- split(Ec[, 2], Ec[, 1])
+        to_heights <- function(pv, H) {
+            d <- numeric(nt + s$phy$Nnode); d[seq_len(nt)] <- H; x <- 1 / (1 + exp(-pv))
+            for (i in seq_along(inner)) { v <- inner[i]; dp <- d[par_of[v]]; d[v] <- dp + (H - dp) * x[i] }
+            list(h = H - d, d = d, x = x)
+        }
+        H0 <- heights_init[root]; d0 <- H0 - heights_init
+        x0 <- (d0[inner] - d0[par_of[inner]]) / (H0 - d0[par_of[inner]]); x0 <- pmin(pmax(x0, 1e-4), 1 - 1e-4)
+        par0 <- c(log(x0 / (1 - x0)), if (optimize_root) log(H0))
+        np <- length(inner); n_eval <- 0L
+        getH <- function(par) if (optimize_root) exp(par[np + 1]) else H0
+        fn <- function(par) { n_eval <<- n_eval + 1L; z <- to_heights(par[seq_len(np)], getH(par))
+            -sum(score_tree_brl_cpp(s$E, s$logP, grid_obj$A, grid_obj$grid, z$h)) }
+        gr <- function(par) {
+            H <- getH(par); z <- to_heights(par[seq_len(np)], H)
+            g <- brl_grad_heights_cpp(s$E, s$logP, grid_obj$A, grid_obj$grid, z$h)
+            gd <- numeric(nt + s$phy$Nnode); gd[as.integer(names(g$grad))] <- -g$grad   # dlogL/d(depth) = -dlogL/dh
+            adj <- gd; xi <- setNames(z$x, inner)
+            for (v in inner_po) for (c in kids[[as.character(v)]]) if (c > nt) adj[v] <- adj[v] + adj[c] * (1 - xi[[as.character(c)]])
+            gp <- vapply(seq_along(inner), function(i) { v <- inner[i]; adj[v] * (H - z$d[par_of[v]]) * z$x[i] * (1 - z$x[i]) }, 0)
+            out <- -gp
+            if (optimize_root) {
+                e <- 1e-3; f1 <- fn(c(par[seq_len(np)], log(H) + e)); f0 <- fn(c(par[seq_len(np)], log(H) - e))
+                out <- c(out, (f1 - f0) / (2 * e))
+            }
+            out
+        }
+        lo <- c(rep(-15, np), if (optimize_root) log(max(H0 / hmax_factor, 1e-3)))
+        hi <- c(rep(15, np), if (optimize_root) log(max(grid_obj$grid)))
+        o <- stats::optim(par0, fn, gr, method = "L-BFGS-B", lower = lo, upper = hi, control = list(maxit = maxit))
+        z <- to_heights(o$par[seq_len(np)], getH(o$par)); h <- z$h; conv <- o$convergence; ll <- -o$value
+    }
+    phy_ml <- s$phy; phy_ml$edge.length <- h[phy_ml$edge[, 1]] - h[phy_ml$edge[, 2]]
+    list(heights = h, heights_rel = h / h[root], root_height = h[root], logL = ll, phy = phy_ml, convergence = conv,
+         n_eval = n_eval, method = method, grid_obj = grid_obj)
 }

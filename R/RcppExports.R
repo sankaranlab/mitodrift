@@ -17,9 +17,35 @@ score_tree_brl_cpp <- function(E, logP_list, A_grid, grid, heights) {
 #' @param n_iter iterations (one node move each); thin: keep every thin-th state
 #' @param step_sd sd of the logit-scale random-walk step
 #' @param refresh full likelihood recomputation every refresh iterations (removes rounding drift)
+#' @param p_scale probability of a root-height (global scaling) move per iteration; 0 keeps the root fixed
+#' @param scale_sd sd of log(c) for the scaling move
 #' @keywords internal
-tree_brl_mcmc_cpp <- function(E, logP_list, A_grid, grid, heights_init, n_iter, step_sd = 1.0, thin = 1L, seed = 1L, refresh = 1000L) {
-    .Call('_mitodrift_tree_brl_mcmc_cpp', PACKAGE = 'mitodrift', E, logP_list, A_grid, grid, heights_init, n_iter, step_sd, thin, seed, refresh)
+tree_brl_mcmc_cpp <- function(E, logP_list, A_grid, grid, heights_init, n_iter, step_sd = 1.0, thin = 1L, seed = 1L, refresh = 1000L, p_scale = 0.0, scale_sd = 0.1) {
+    .Call('_mitodrift_tree_brl_mcmc_cpp', PACKAGE = 'mitodrift', E, logP_list, A_grid, grid, heights_init, n_iter, step_sd, thin, seed, refresh, p_scale, scale_sd)
+}
+
+#' Maximum-likelihood node heights by coordinate ascent (internal)
+#'
+#' Sweeps over the internal non-root nodes; each node's position f between its highest child and its parent is
+#' maximised by golden-section search on logit(f) (incremental path-to-root scoring per evaluation), as the original
+#' estimate_brl_iter() did per node with Brent and full rescoring. After each sweep, if optimize_root, the global
+#' scale (root height) is maximised by golden-section search on log(c) within [h_root / max_factor, grid max].
+#' Stops when a sweep gains less than tol_ll log-likelihood units, or after max_sweeps.
+#' @keywords internal
+tree_brl_optimize_cpp <- function(E, logP_list, A_grid, grid, heights_init, max_sweeps = 50L, tol_ll = 0.01, optimize_root = TRUE, max_factor = 50.0, golden_iter = 30L) {
+    .Call('_mitodrift_tree_brl_optimize_cpp', PACKAGE = 'mitodrift', E, logP_list, A_grid, grid, heights_init, max_sweeps, tol_ll, optimize_root, max_factor, golden_iter)
+}
+
+#' Log-likelihood and its gradient with respect to internal node heights (internal)
+#'
+#' dlogL/dh_v for every internal non-root node by central differences, each evaluated incrementally (only v's edges
+#' and its path to the root are rescored; nothing is committed). Used by optimize_brl(method = "joint"), which chains
+#' these into the gradient of the top-down (x_to_length) parameterisation.
+#' @param rel_step step as a fraction of the node's admissible span (between its highest child and its parent)
+#' @return list(logL, grad (named by 1-indexed node), nodes)
+#' @keywords internal
+brl_grad_heights_cpp <- function(E, logP_list, A_grid, grid, heights, rel_step = 1e-3) {
+    .Call('_mitodrift_brl_grad_heights_cpp', PACKAGE = 'mitodrift', E, logP_list, A_grid, grid, heights, rel_step)
 }
 
 prop_clades_par <- function(E_target, edges, rooted = TRUE, normalize = TRUE) {
