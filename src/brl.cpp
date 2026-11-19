@@ -525,21 +525,30 @@ struct GradWorker : public Worker {
                 const int p = T.par[ei], c = T.ch[ei];
                 // beta[r]: everything outside c's subtree, as a function of the parent's state r
                 for (int r = 0; r < C; ++r) beta[r] = out[(size_t)p * C + r] + lp[r * n + p] + msg[(size_t)p * C + r] - contrib[(size_t)ei * C + r];
-                // inside of c: in[j] = logP[c][j] + msg[c][j]
-                for (int j = 0; j < C; ++j) temp[j] = lp[j * n + c] + msg[(size_t)c * C + j];
+                // inside of c: in[j] = logP[c][j] + msg[c][j]; work with exp-shifted vectors so each sum below is
+                // C exps + C^2 multiply-adds (not C^2 exps)
+                double mt = -std::numeric_limits<double>::infinity(), mbeta = -std::numeric_limits<double>::infinity();
+                for (int j = 0; j < C; ++j) { temp[j] = lp[j * n + c] + msg[(size_t)c * C + j]; if (temp[j] > mt) mt = temp[j]; }
+                for (int r = 0; r < C; ++r) if (beta[r] > mbeta) mbeta = beta[r];
+                for (int j = 0; j < C; ++j) temp[j] = std::isfinite(mt) ? std::exp(temp[j] - mt) : 0.0;
+                for (int r = 0; r < C; ++r) beta[r] = std::isfinite(mbeta) ? std::exp(beta[r] - mbeta) : 0.0;   // beta now exp-shifted
                 // derivative: sum_{r,j} exp(beta[r] + in[j] - logZ) * dA[r][j]
                 const double* D = &dA[(size_t)ei * C * C]; double g = 0.0;
                 for (int r = 0; r < C; ++r) {
-                    if (!std::isfinite(beta[r])) continue;
-                    for (int j = 0; j < C; ++j) { const double d = D[r * C + j]; if (d != 0.0 && std::isfinite(temp[j])) g += std::exp(beta[r] + temp[j] - logz[l]) * d; }
+                    if (beta[r] == 0.0) continue;
+                    double sr = 0.0; const double* Dr = D + r * C;
+                    for (int j = 0; j < C; ++j) sr += Dr[j] * temp[j];
+                    g += beta[r] * sr;
                 }
-                dt[ei] = g;
+                dt[ei] = (std::isfinite(mt) && std::isfinite(mbeta)) ? g * std::exp(mbeta + mt - logz[l]) : 0.0;
                 // outside message for c: out[c][j] = log sum_r exp(beta[r] + rowmax[r]) * expA[r][j]
                 double mb = -std::numeric_limits<double>::infinity();
-                for (int r = 0; r < C; ++r) { u[r] = beta[r] + rowmax[(size_t)ei * C + r]; if (u[r] > mb) mb = u[r]; }
+                for (int r = 0; r < C; ++r) { u[r] = (beta[r] > 0.0) ? std::log(beta[r]) + mbeta + rowmax[(size_t)ei * C + r] : -std::numeric_limits<double>::infinity(); if (u[r] > mb) mb = u[r]; }
+                for (int r = 0; r < C; ++r) u[r] = std::isfinite(mb) ? std::exp(u[r] - mb) : 0.0;
+                const double* EA = &expA[(size_t)ei * C * C];
                 for (int j = 0; j < C; ++j) {
-                    double s = 0.0; for (int r = 0; r < C; ++r) if (std::isfinite(u[r])) s += std::exp(u[r] - mb) * expA[(size_t)ei * C * C + r * C + j];
-                    out[(size_t)c * C + j] = mb + std::log(s);
+                    double s = 0.0; for (int r = 0; r < C; ++r) s += u[r] * EA[r * C + j];
+                    out[(size_t)c * C + j] = (s > 0.0 && std::isfinite(mb)) ? mb + std::log(s) : -std::numeric_limits<double>::infinity();
                 }
             }
         }
