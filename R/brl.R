@@ -54,10 +54,19 @@ brl_init_heights <- function(phy, htotal) {
     h
 }
 
+# Edge vector and per-locus logP for the C++ code. Uses ape's postorder (root = Ntip + 1, root edges last), not
+# reorder_phylo()/reorderRcpp(), which assume a binary tree (n_tips = n_edges / 2 + 1); polytomies are allowed here.
 brl_setup <- function(phy, logliks) {
     phy$node.label <- NULL
-    E <- reorder_phylo(phy)$edge
-    list(E = as.integer(c(E[, 1], E[, 2])), logP = convert_logliks_to_logP_list(logliks, phy), phy = phy)
+    E <- ape::reorder.phylo(phy, "postorder")$edge
+    nt <- length(phy$tip.label); nn <- phy$Nnode; root <- nt + 1L
+    logP <- lapply(logliks, function(lm) {
+        k <- nrow(lm); P <- matrix(log(1 / k), k, nt + nn)
+        P[, seq_len(nt)] <- lm[, phy$tip.label]
+        P[, root] <- log(c(1, rep(0, k - 1)))
+        as.vector(t(P))
+    })
+    list(E = as.integer(c(E[, 1], E[, 2])), logP = logP, phy = phy)
 }
 
 #' Log-likelihood of a tree with branch lengths
