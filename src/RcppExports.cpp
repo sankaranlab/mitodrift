@@ -84,6 +84,21 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// brl_grad_exact_cpp
+List brl_grad_exact_cpp(arma::Col<int> E, const std::vector<std::vector<double>>& logP_list, const std::vector<std::vector<double>>& A_grid, const std::vector<double>& grid, const std::vector<double>& heights);
+RcppExport SEXP _mitodrift_brl_grad_exact_cpp(SEXP ESEXP, SEXP logP_listSEXP, SEXP A_gridSEXP, SEXP gridSEXP, SEXP heightsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< arma::Col<int> >::type E(ESEXP);
+    Rcpp::traits::input_parameter< const std::vector<std::vector<double>>& >::type logP_list(logP_listSEXP);
+    Rcpp::traits::input_parameter< const std::vector<std::vector<double>>& >::type A_grid(A_gridSEXP);
+    Rcpp::traits::input_parameter< const std::vector<double>& >::type grid(gridSEXP);
+    Rcpp::traits::input_parameter< const std::vector<double>& >::type heights(heightsSEXP);
+    rcpp_result_gen = Rcpp::wrap(brl_grad_exact_cpp(E, logP_list, A_grid, grid, heights));
+    return rcpp_result_gen;
+END_RCPP
+}
 // prop_clades_par
 Rcpp::NumericVector prop_clades_par(Rcpp::IntegerMatrix E_target, SEXP edges, bool rooted, bool normalize);
 RcppExport SEXP _mitodrift_prop_clades_par(SEXP E_targetSEXP, SEXP edgesSEXP, SEXP rootedSEXP, SEXP normalizeSEXP) {
@@ -382,6 +397,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_mitodrift_tree_brl_mcmc_cpp", (DL_FUNC) &_mitodrift_tree_brl_mcmc_cpp, 12},
     {"_mitodrift_tree_brl_optimize_cpp", (DL_FUNC) &_mitodrift_tree_brl_optimize_cpp, 10},
     {"_mitodrift_brl_grad_heights_cpp", (DL_FUNC) &_mitodrift_brl_grad_heights_cpp, 6},
+    {"_mitodrift_brl_grad_exact_cpp", (DL_FUNC) &_mitodrift_brl_grad_exact_cpp, 5},
     {"_mitodrift_prop_clades_par", (DL_FUNC) &_mitodrift_prop_clades_par, 4},
     {"_mitodrift_compute_node_edge_stats_bp2", (DL_FUNC) &_mitodrift_compute_node_edge_stats_bp2, 3},
     {"_mitodrift_get_leaf_liks_mat_cpp", (DL_FUNC) &_mitodrift_get_leaf_liks_mat_cpp, 8},

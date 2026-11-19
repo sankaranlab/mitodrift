@@ -48,6 +48,17 @@ brl_grad_heights_cpp <- function(E, logP_list, A_grid, grid, heights, rel_step =
     .Call('_mitodrift_brl_grad_heights_cpp', PACKAGE = 'mitodrift', E, logP_list, A_grid, grid, heights, rel_step)
 }
 
+#' Exact gradient of the log-likelihood with respect to node heights (internal)
+#'
+#' One inside-outside pass per locus (parallel over loci): dlogL/dt_e = sum_{r,j} P(parent r, child j | data) *
+#' (dA_e[r][j]/dt) / A_e[r][j], with dA/dt the slope of the interpolation segment; then dlogL/dh_v = sum over v's
+#' child edges minus the edge above v. Returned for every internal node including the root.
+#' @return list(logL, grad (named by 1-indexed node))
+#' @keywords internal
+brl_grad_exact_cpp <- function(E, logP_list, A_grid, grid, heights) {
+    .Call('_mitodrift_brl_grad_exact_cpp', PACKAGE = 'mitodrift', E, logP_list, A_grid, grid, heights)
+}
+
 prop_clades_par <- function(E_target, edges, rooted = TRUE, normalize = TRUE) {
     .Call('_mitodrift_prop_clades_par', PACKAGE = 'mitodrift', E_target, edges, rooted, normalize)
 }

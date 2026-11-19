@@ -492,3 +492,90 @@ List brl_grad_heights_cpp(arma::Col<int> E, const std::vector<std::vector<double
     NumericVector gr = wrap(grad); gr.attr("names") = wrap(nodes);
     return List::create(_["logL"] = cur, _["grad"] = gr, _["nodes"] = wrap(nodes));
 }
+
+namespace {
+
+// dA/dt of the interpolated edge matrix at t (row-major C x C): the slope of the grid segment containing t
+// (0 outside the grid). Piecewise linear interpolation makes this piecewise constant.
+inline void edge_dmatrix(double t, const std::vector<double>& grid, const std::vector<std::vector<double>>& Ag, int C, double* out) {
+    const int G = grid.size();
+    if (t < grid[0] || t >= grid[G - 1]) { std::fill(out, out + C * C, 0.0); return; }
+    const int lo = static_cast<int>(std::upper_bound(grid.begin(), grid.end(), t) - grid.begin()) - 1;
+    const double w = 1.0 / (grid[lo + 1] - grid[lo]);
+    for (int i = 0; i < C * C; ++i) out[i] = (Ag[lo + 1][i] - Ag[lo][i]) * w;
+}
+
+// Inside-outside for one locus: returns logZ and adds dlogZ/dt_e for every edge into dt (length m).
+struct GradWorker : public Worker {
+    const BrlTree& T; const std::vector<std::vector<double>>& logP;
+    const std::vector<double>& expA; const std::vector<double>& rowmax; const std::vector<double>& dA;
+    std::vector<std::vector<double>>& dt_l; std::vector<double>& logz;
+    GradWorker(const BrlTree& T, const std::vector<std::vector<double>>& logP, const std::vector<double>& expA,
+               const std::vector<double>& rowmax, const std::vector<double>& dA, std::vector<std::vector<double>>& dt_l,
+               std::vector<double>& logz) : T(T), logP(logP), expA(expA), rowmax(rowmax), dA(dA), dt_l(dt_l), logz(logz) {}
+    void operator()(std::size_t b, std::size_t e) {
+        const int C = T.C, n = T.n, m = T.m;
+        std::vector<double> msg((size_t)n * C), contrib((size_t)m * C), out((size_t)n * C, 0.0), temp(C), u(C), beta(C);
+        for (std::size_t l = b; l < e; ++l) {
+            const double* lp = logP[l].data();
+            logz[l] = full_pass(T, lp, expA, rowmax, msg, contrib);
+            std::fill(out.begin(), out.end(), 0.0);
+            std::vector<double>& dt = dt_l[l]; dt.assign(m, 0.0);
+            for (int ei = m - 1; ei >= 0; --ei) {          // reverse postorder: parents before children
+                const int p = T.par[ei], c = T.ch[ei];
+                // beta[r]: everything outside c's subtree, as a function of the parent's state r
+                for (int r = 0; r < C; ++r) beta[r] = out[(size_t)p * C + r] + lp[r * n + p] + msg[(size_t)p * C + r] - contrib[(size_t)ei * C + r];
+                // inside of c: in[j] = logP[c][j] + msg[c][j]
+                for (int j = 0; j < C; ++j) temp[j] = lp[j * n + c] + msg[(size_t)c * C + j];
+                // derivative: sum_{r,j} exp(beta[r] + in[j] - logZ) * dA[r][j]
+                const double* D = &dA[(size_t)ei * C * C]; double g = 0.0;
+                for (int r = 0; r < C; ++r) {
+                    if (!std::isfinite(beta[r])) continue;
+                    for (int j = 0; j < C; ++j) { const double d = D[r * C + j]; if (d != 0.0 && std::isfinite(temp[j])) g += std::exp(beta[r] + temp[j] - logz[l]) * d; }
+                }
+                dt[ei] = g;
+                // outside message for c: out[c][j] = log sum_r exp(beta[r] + rowmax[r]) * expA[r][j]
+                double mb = -std::numeric_limits<double>::infinity();
+                for (int r = 0; r < C; ++r) { u[r] = beta[r] + rowmax[(size_t)ei * C + r]; if (u[r] > mb) mb = u[r]; }
+                for (int j = 0; j < C; ++j) {
+                    double s = 0.0; for (int r = 0; r < C; ++r) if (std::isfinite(u[r])) s += std::exp(u[r] - mb) * expA[(size_t)ei * C * C + r * C + j];
+                    out[(size_t)c * C + j] = mb + std::log(s);
+                }
+            }
+        }
+    }
+};
+
+} // namespace
+
+//' Exact gradient of the log-likelihood with respect to node heights (internal)
+//'
+//' One inside-outside pass per locus (parallel over loci): dlogL/dt_e = sum_{r,j} P(parent r, child j | data) *
+//' (dA_e[r][j]/dt) / A_e[r][j], with dA/dt the slope of the interpolation segment; then dlogL/dh_v = sum over v's
+//' child edges minus the edge above v. Returned for every internal node including the root.
+//' @return list(logL, grad (named by 1-indexed node))
+//' @keywords internal
+// [[Rcpp::export]]
+List brl_grad_exact_cpp(arma::Col<int> E, const std::vector<std::vector<double>>& logP_list,
+                        const std::vector<std::vector<double>>& A_grid, const std::vector<double>& grid,
+                        const std::vector<double>& heights) {
+    const int L = logP_list.size(); const int C = std::lround(std::sqrt((double)A_grid[0].size()));
+    const int n = logP_list[0].size() / C;
+    BrlTree T = build_tree(E, C, L, n);
+    std::vector<double> expA, rowmax; all_edge_matrices(T, heights, grid, A_grid, expA, rowmax);
+    std::vector<double> dA((size_t)T.m * C * C);
+    for (int e = 0; e < T.m; ++e) edge_dmatrix(heights[T.par[e]] - heights[T.ch[e]], grid, A_grid, C, &dA[(size_t)e * C * C]);
+    std::vector<std::vector<double>> dt_l(L); std::vector<double> logz(L);
+    GradWorker w(T, logP_list, expA, rowmax, dA, dt_l, logz); parallelFor(0, L, w);
+    std::vector<double> dt(T.m, 0.0); double ll = 0.0;
+    for (int l = 0; l < L; ++l) { ll += logz[l]; for (int e = 0; e < T.m; ++e) dt[e] += dt_l[l][e]; }
+    std::vector<int> nodes; std::vector<double> grad;
+    for (int v = 0; v < n; ++v) {
+        if (T.child_edges[v].empty()) continue;
+        double g = 0.0; for (int ce : T.child_edges[v]) g += dt[ce];
+        if (T.up_edge[v] >= 0) g -= dt[T.up_edge[v]];
+        nodes.push_back(v + 1); grad.push_back(g);
+    }
+    NumericVector gr = wrap(grad); gr.attr("names") = wrap(nodes);
+    return List::create(_["logL"] = ll, _["grad"] = gr);
+}

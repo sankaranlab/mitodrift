@@ -171,9 +171,8 @@ md_brl_mcmc <- function(md, phy = NULL, htotal = NULL, ...) {
 #' `method = "joint"` (default): all node positions and the root height are optimised together by L-BFGS-B, in the
 #' top-down parameterisation of the original `x_to_length()`: a node's depth from the root is
 #' `d_v = d_parent + (H - d_parent) * x_v`, `x_v = sigmoid(p_v)`, so moving a node carries its subtree and every
-#' parameter vector is a valid ultrametric tree. The likelihood is a full C++ pass; the gradient comes from
-#' incremental central differences in each node height ([brl_grad_heights_cpp]), chained analytically into `p`, plus
-#' a central difference in log H. `method = "coordinate"`: per-node golden-section sweeps (as the original
+#' parameter vector is a valid ultrametric tree. The likelihood is a full C++ pass; the gradient is exact, from one
+#' inside-outside pass ([brl_grad_exact_cpp], parallel over loci), chained analytically into `p` and log H. `method = "coordinate"`: per-node golden-section sweeps (as the original
 #' `estimate_brl_iter()`), each node moving between its highest child and its parent.
 #'
 #' @inheritParams run_brl_mcmc
@@ -220,16 +219,14 @@ optimize_brl <- function(phy, logliks, k, npop, eps, ngen_ref, htotal, grid = NU
             -sum(score_tree_brl_cpp(s$E, s$logP, grid_obj$A, grid_obj$grid, z$h)) }
         gr <- function(par) {
             H <- getH(par); z <- to_heights(par[seq_len(np)], H)
-            g <- brl_grad_heights_cpp(s$E, s$logP, grid_obj$A, grid_obj$grid, z$h)
-            gd <- numeric(nt + s$phy$Nnode); gd[as.integer(names(g$grad))] <- -g$grad   # dlogL/d(depth) = -dlogL/dh
+            g <- brl_grad_exact_cpp(s$E, s$logP, grid_obj$A, grid_obj$grid, z$h)          # exact, one inside-outside pass
+            gh <- numeric(nt + s$phy$Nnode); gh[as.integer(names(g$grad))] <- g$grad
+            gd <- -gh; gd[root] <- 0                                                         # dlogL/d(depth) = -dlogL/dh
             adj <- gd; xi <- setNames(z$x, inner)
             for (v in inner_po) for (c in kids[[as.character(v)]]) if (c > nt) adj[v] <- adj[v] + adj[c] * (1 - xi[[as.character(c)]])
             gp <- vapply(seq_along(inner), function(i) { v <- inner[i]; adj[v] * (H - z$d[par_of[v]]) * z$x[i] * (1 - z$x[i]) }, 0)
             out <- -gp
-            if (optimize_root) {
-                e <- 1e-3; f1 <- fn(c(par[seq_len(np)], log(H) + e)); f0 <- fn(c(par[seq_len(np)], log(H) - e))
-                out <- c(out, (f1 - f0) / (2 * e))
-            }
+            if (optimize_root) out <- c(out, -sum(gh * z$h))   # scaling every height by c: dlogL/dlog c = sum_v h_v dlogL/dh_v
             out
         }
         lo <- c(rep(-15, np), if (optimize_root) log(max(H0 / hmax_factor, 1e-3)))
