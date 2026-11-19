@@ -238,3 +238,103 @@ optimize_brl <- function(phy, logliks, k, npop, eps, ngen_ref, htotal, grid = NU
     list(heights = h, heights_rel = h / h[root], root_height = h[root], logL = ll, phy = phy_ml, convergence = conv,
          n_eval = n_eval, method = method, grid_obj = grid_obj)
 }
+
+#' Hamiltonian Monte Carlo over node heights on a fixed topology
+#'
+#' Samples the same posterior as [run_brl_mcmc()] (uniform prior on valid node heights given the root height H, prior
+#' 1/H on H) in the unconstrained top-down parameterisation of `x_to_length()`: a node's relative depth is
+#' `D_v = D_parent + (1 - D_parent) x_v`, `x_v = sigmoid(p_v)`, heights `h = H (1 - D)`, plus `log H`. In these
+#' coordinates the prior with its Jacobian is `prod_v (1 - D_parent(v)) x_v (1 - x_v)`, whose log-gradient is
+#' `(1 - 2 x_a) - n_a x_a` for node a with n_a internal descendants. The likelihood gradient is exact (one
+#' inside-outside pass per locus, [brl_grad_exact_cpp()], parallel over loci), chained to `p` and `log H`.
+#' Every iteration moves all nodes (leapfrog integration, `n_leapfrog` steps); warm-up tunes the step size by dual
+#' averaging (target acceptance `delta`) and a diagonal mass matrix from the middle of warm-up.
+#'
+#' @inheritParams run_brl_mcmc
+#' @param n_warmup,n_sample Warm-up and kept iterations.
+#' @param n_leapfrog Leapfrog steps per iteration (jittered +-50%).
+#' @param delta Target acceptance rate.
+#' @param heights_init Starting heights (default: Grafen-style at `htotal`).
+#' @return A list: `trace_rel` (kept relative heights, one column per internal non-root node), `root_height`, `logL`,
+#'   `accept` (per kept iteration), `step_size`, `nodes`, `seconds`.
+#' @export
+run_brl_hmc <- function(phy, logliks, k, npop, eps, ngen_ref, htotal, n_warmup = 500, n_sample = 1000, n_leapfrog = 20,
+                        delta = 0.8, grid = NULL, heights_init = NULL, hmax_factor = 50, seed = 1, ncores = 1) {
+    set.seed(seed); t0 <- Sys.time()
+    RcppParallel::setThreadOptions(numThreads = ncores)
+    if (is.null(grid)) {
+        hmax <- ceiling(htotal * hmax_factor)
+        grid <- sort(unique(c(0:min(30, hmax), round(exp(seq(log(min(31, hmax)), log(hmax), length.out = 90))))))
+    }
+    grid_obj <- brl_transition_grid(k = k, npop = npop, eps = eps, ngen_ref = ngen_ref, grid = grid)
+    s <- brl_setup(phy, logliks)
+    nt <- length(s$phy$tip.label); nn <- s$phy$Nnode; root <- nt + 1L
+    if (is.null(heights_init)) heights_init <- brl_init_heights(s$phy, htotal)
+    Ec <- ape::reorder.phylo(s$phy, "cladewise")$edge
+    par_of <- integer(nt + nn); par_of[Ec[, 2]] <- Ec[, 1]
+    inner <- Ec[Ec[, 2] > nt, 2]; np <- length(inner); pos <- integer(nt + nn); pos[inner] <- seq_len(np)
+    kids <- split(Ec[, 2], Ec[, 1]); inner_po <- rev(inner)
+    ndesc <- integer(nt + nn); for (v in inner_po) for (c in kids[[as.character(v)]]) if (c > nt) ndesc[v] <- ndesc[v] + 1L + ndesc[c]
+    hmax_val <- max(grid_obj$grid)
+    geom <- function(th) {
+        x <- 1 / (1 + exp(-th[seq_len(np)])); H <- exp(th[np + 1])
+        D <- numeric(nt + nn); D[seq_len(nt)] <- 1
+        for (i in seq_len(np)) { v <- inner[i]; Dp <- D[par_of[v]]; D[v] <- Dp + (1 - Dp) * x[i] }
+        list(x = x, H = H, D = D, h = H * (1 - D))
+    }
+    logpost_grad <- function(th) {
+        g <- geom(th)
+        if (g$H > hmax_val) return(list(lp = -Inf, grad = rep(0, np + 1)))
+        r <- brl_grad_exact_cpp(s$E, s$logP, grid_obj$A, grid_obj$grid, g$h)
+        gh <- numeric(nt + nn); gh[as.integer(names(r$grad))] <- r$grad
+        # likelihood: dlogL/dD_v = -H dlogL/dh_v (non-root); adjoint down the tree; then to p and log H
+        adj <- -g$H * gh; adj[root] <- 0
+        for (v in inner_po) for (c in kids[[as.character(v)]]) if (c > nt) adj[v] <- adj[v] + adj[c] * (1 - g$x[pos[c]])
+        Dp <- g$D[par_of[inner]]
+        gp <- adj[inner] * (1 - Dp) * g$x * (1 - g$x)
+        glogH <- sum(gh * g$h)
+        # prior with Jacobian
+        lp_prior <- sum(log1p(-Dp)) + sum(log(g$x) + log1p(-g$x))
+        gp <- gp + (1 - 2 * g$x) - ndesc[inner] * g$x
+        list(lp = r$logL + lp_prior, grad = c(gp, glogH), logL = r$logL, H = g$H, h = g$h)
+    }
+    # start
+    H0 <- heights_init[root]; D0 <- 1 - heights_init / H0
+    x0 <- (D0[inner] - D0[par_of[inner]]) / pmax(1 - D0[par_of[inner]], 1e-12); x0 <- pmin(pmax(x0, 1e-4), 1 - 1e-4)
+    th <- c(log(x0 / (1 - x0)), log(H0)); cur <- logpost_grad(th)
+    minv <- rep(1, np + 1)                                   # inverse mass (variances)
+    # step size: find a reasonable start, then dual averaging during warm-up
+    eps_s <- 0.01; mu <- log(10 * eps_s); Hbar <- 0; logeps_bar <- 0; gamma <- 0.05; t0da <- 10; kap <- 0.75
+    n_tot <- n_warmup + n_sample; keep_rows <- (n_warmup + 1):n_tot
+    trace <- matrix(NA_real_, n_sample, np); root_tr <- numeric(n_sample); ll_tr <- numeric(n_sample); acc_tr <- numeric(n_sample)
+    warm_store <- matrix(NA_real_, 0, np + 1); win <- c(floor(0.3 * n_warmup), floor(0.85 * n_warmup))
+    for (it in seq_len(n_tot)) {
+        L <- max(1L, round(n_leapfrog * runif(1, 0.5, 1.5)))
+        r0 <- rnorm(np + 1) / sqrt(minv); th1 <- th; r <- r0 + 0.5 * eps_s * cur$grad; nw <- cur; ok <- TRUE
+        for (l in seq_len(L)) {
+            th1 <- th1 + eps_s * minv * r
+            nw <- logpost_grad(th1); if (!is.finite(nw$lp)) { ok <- FALSE; break }
+            if (l < L) r <- r + eps_s * nw$grad
+        }
+        if (ok) r <- r + 0.5 * eps_s * nw$grad
+        logacc <- if (ok) (nw$lp - 0.5 * sum(r^2 * minv)) - (cur$lp - 0.5 * sum(r0^2 * minv)) else -Inf
+        a <- min(1, exp(logacc)); if (!is.finite(a)) a <- 0
+        if (runif(1) < a) { th <- th1; cur <- nw }
+        if (it <= n_warmup) {
+            m <- it; Hbar <- (1 - 1 / (m + t0da)) * Hbar + (delta - a) / (m + t0da)
+            logeps <- mu - sqrt(m) / gamma * Hbar; eta <- m^(-kap); logeps_bar <- eta * logeps + (1 - eta) * logeps_bar
+            eps_s <- exp(logeps)
+            if (it > win[1] && it <= win[2]) warm_store <- rbind(warm_store, th)
+            if (it == win[2] && nrow(warm_store) > 20) {        # diagonal mass matrix, then restart step-size adaptation
+                minv <- pmax(apply(warm_store, 2, var), 1e-6); mu <- log(10 * eps_s); Hbar <- 0; logeps_bar <- 0
+            }
+            if (it == n_warmup) eps_s <- exp(logeps_bar)
+        } else {
+            j <- it - n_warmup; g <- geom(th)
+            trace[j, ] <- (g$h / g$H)[inner]; root_tr[j] <- g$H; ll_tr[j] <- cur$logL; acc_tr[j] <- a
+        }
+    }
+    colnames(trace) <- inner
+    list(trace_rel = trace, root_height = root_tr, logL = ll_tr, accept = acc_tr, step_size = eps_s, nodes = inner,
+         minv = minv, seconds = as.numeric(difftime(Sys.time(), t0, units = "secs")))
+}
